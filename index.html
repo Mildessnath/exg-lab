@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulator Akuisisi ECG</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M2 18h7l3-10 4 18 3-12 2 4h9' fill='none' stroke='%231f6feb' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg: #f4f6f9;
+      --panel: #ffffff;
+      --ink: #1d2433;
+      --muted: #5c6577;
+      --line: #dfe3ea;
+      --accent: #1f6feb;
+      --ok: #1a7f37;
+      --ok-bg: #dafbe1;
+      --bad: #cf222e;
+      --bad-bg: #ffebe9;
+      --warn-bg: #fff8c5;
+      --warn-ink: #7d4e00;
+      --pending: #9aa3b2;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    header { padding: 14px 20px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+    header h1 { margin: 0; font-size: 19px; }
+    header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+    .disclaimer {
+      margin: 0; padding: 7px 20px; background: var(--warn-bg); color: var(--warn-ink);
+      border-bottom: 1px solid #eedc82; font-size: 13px;
+    }
+    .layout {
+      display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px;
+      padding: 16px; align-items: start;
+    }
+    @media (max-width: 900px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+    /* ---------- Kolom kontrol ---------- */
+    .controls {
+      background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+      padding: 4px 14px 12px; position: sticky; top: 12px;
+      max-height: calc(100vh - 24px); overflow-y: auto;
+    }
+    @media (max-width: 900px) { .controls { position: static; max-height: none; } }
+    .controls h2 {
+      font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+      margin: 14px 0 6px; padding-top: 10px; border-top: 1px solid var(--line);
+    }
+    .controls h2:first-child { border-top: 0; padding-top: 4px; }
+    .row { margin: 7px 0; }
+    .row > label, .row .lbl { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+    .row output { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; }
+    input[type=range] { width: 100%; margin: 3px 0 0; accent-color: var(--accent); }
+    select { width: 100%; padding: 4px 6px; font: inherit; border: 1px solid var(--line); border-radius: 5px; background: #fff; }
+    .row > label.toggle { justify-content: flex-start; }
+    .toggle { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; cursor: pointer; }
+    .dist { border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; margin: 7px 0; }
+    .dist.off .sub { opacity: .45; }
+    .hint { color: var(--muted); font-size: 12px; margin: 3px 0 0; }
+    .seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+    .seg label { flex: 1; text-align: center; padding: 5px 0; cursor: pointer; font-size: 13px; border-left: 1px solid var(--line); }
+    .seg label:first-child { border-left: 0; }
+    .seg input { display: none; }
+    .seg label:has(input:checked) { background: var(--accent); color: #fff; }
+    [hidden] { display: none !important; }
+
+    /* ---------- Kolom plot ---------- */
+    .main { min-width: 0; }
+    .pipeline { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
+    .stage {
+      padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+      background: #e7efff; color: var(--accent); border: 1px solid #c4d6fb;
+    }
+    .stage.pending { background: #f0f1f4; color: var(--pending); border-color: var(--line); border-style: dashed; }
+    .arrow { color: var(--pending); }
+    .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    .tabs button {
+      font: inherit; font-size: 13px; padding: 8px 14px; border: 1px solid transparent; border-bottom: 0;
+      background: transparent; color: var(--muted); cursor: pointer; border-radius: 6px 6px 0 0; margin-bottom: -1px;
+    }
+    .tabs button[aria-selected=true] { background: var(--panel); color: var(--ink); border-color: var(--line); font-weight: 600; }
+    .tabpanel { background: var(--panel); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 8px 8px; padding: 14px; }
+    .plot-card { margin-bottom: 14px; }
+    .plot-card h3 { margin: 0 0 4px; font-size: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    canvas.plot { width: 100%; height: 240px; display: block; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    .badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; letter-spacing: .03em; }
+    .badge.ok { background: var(--ok-bg); color: var(--ok); }
+    .badge.bad { background: var(--bad-bg); color: var(--bad); }
+    .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+    .info { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+    .info h4 { margin: 0 0 6px; font-size: 13px; }
+    .info table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .info td { padding: 2px 0; vertical-align: top; }
+    .info td:first-child { color: var(--muted); padding-right: 10px; }
+    .info td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+    .info tr.sep td { border-top: 1px solid var(--line); padding-top: 5px; }
+    .placeholder { color: var(--muted); padding: 30px 10px; text-align: center; }
+    .placeholder strong { color: var(--ink); display: block; font-size: 15px; margin-bottom: 4px; }
+    /* ---------- Eksperimen 2 ---------- */
+    .presets { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+    .presets button {
+      font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px;
+      background: #fff; color: var(--ink); cursor: pointer;
+    }
+    .presets button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .filter-summary {
+      display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: baseline;
+      padding: 8px 12px; margin-bottom: 12px; background: #f6f8fb; border: 1px solid var(--line); border-radius: 6px;
+    }
+    .filter-summary .big { font-weight: 700; }
+    .filter-summary .m3 { color: var(--accent); font-weight: 700; font-variant-numeric: tabular-nums; }
+    .tip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin: 0 0 10px; }
+    .tip button, .plot-tools select {
+      font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 5px; background: #fff; cursor: pointer;
+    }
+    .plot-tools { display: inline-flex; flex-wrap: wrap; gap: 12px; align-items: center; font-weight: 400; font-size: 12px; margin-left: auto; }
+    .plot-tools select { width: auto; }
+    .plot-tools label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+    canvas.plot + canvas.plot { margin-top: 8px; }
+    .info table.cmp td { text-align: right; }
+    .info table.cmp td:first-child { text-align: left; }
+    .info table.cmp th { font-size: 12px; color: var(--muted); font-weight: 600; text-align: right; padding-bottom: 3px; }
+    .notes { margin: 10px 0 0; padding-left: 18px; font-size: 13px; }
+    .notes li { margin: 3px 0; }
+    .notes .warn { color: var(--bad); }
+    .notes .good { color: var(--ok); }
+    .explain { margin-top: 14px; }
+    .explain h4 { margin: 0 0 8px; font-size: 14px; }
+    .explain-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+    .xcard { border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; font-size: 13px; }
+    .xcard.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; background: #f7faff; }
+    .xcard h5 { margin: 0 0 4px; font-size: 13px; }
+    .xcard p, .xcard ul { margin: 4px 0; }
+    .xcard ul { padding-left: 18px; }
+    .xcard.general { grid-column: 1 / -1; background: #fffdf3; border-color: #eedc82; }
+    /* ---------- Eksperimen 3 ---------- */
+    .seg + input[type=range] { margin-top: 6px; }
+    .alias-banner { padding: 9px 12px; border-radius: 6px; margin-bottom: 10px; font-size: 13px; border: 1px solid; }
+    .alias-banner.bad { background: var(--bad-bg); color: var(--bad); border-color: #ffcecb; }
+    .alias-banner.ok { background: var(--ok-bg); color: var(--ok); border-color: #aceebb; }
+    .alias-banner b { font-size: 14px; }
+    .table-scroll { overflow-x: auto; }
+    table.data { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+    table.data th, table.data td { padding: 3px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    table.data th { color: var(--muted); font-weight: 600; background: #f6f8fb; }
+    table.data td.mono { font-family: ui-monospace, Consolas, monospace; }
+    table.data tr.clip td { color: var(--bad); }
+    table.data tr.warn td { color: var(--bad); font-weight: 600; }
+    /* ---------- Eksperimen 4 & Validasi ---------- */
+    .preset-box {
+      display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: space-between;
+      padding: 10px 14px; margin-bottom: 14px; border: 1px solid #c4d6fb; background: #f3f7ff; border-radius: 6px;
+    }
+    .preset-box p { margin: 2px 0 0; }
+    button.primary {
+      font: inherit; font-size: 13px; font-weight: 600; padding: 6px 14px; border-radius: 6px; cursor: pointer;
+      background: var(--accent); color: #fff; border: 1px solid var(--accent);
+    }
+    .export-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .csv-preview {
+      margin: 8px 0 0; padding: 8px 10px; background: #f6f8fb; border: 1px solid var(--line); border-radius: 5px;
+      font: 12px/1.4 ui-monospace, Consolas, monospace; overflow-x: auto; max-height: 140px;
+    }
+    .rc-inputs { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-bottom: 8px; font-size: 13px; }
+    .rc-inputs input { width: 90px; font: inherit; padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; }
+    table.data td.ok { color: var(--ok); font-weight: 600; text-align: left; }
+    table.data td.fail { color: var(--bad); font-weight: 600; text-align: left; }
+    table.data td.amber { color: var(--warn-ink); font-weight: 600; text-align: left; }
+    table.data td.l, table.data th.l { text-align: left; }
+    footer { color: var(--muted); font-size: 12px; padding: 0 16px 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Simulator Akuisisi Sinyal ECG</h1>
+    <p>AI-Assisted Biomedical Signal Conditioning and Data Acquisition — rantai ECG → Amplifier → Filter → Sampling → Kuantisasi → Output digital</p>
+  </header>
+  <p class="disclaimer"><strong>Hanya untuk pembelajaran.</strong> Sinyal di sini adalah model sintetis yang disederhanakan; bukan perangkat medis dan tidak boleh dipakai untuk diagnosis atau keputusan klinis.</p>
+
+  <div class="layout">
+    <!-- ================= KONTROL ================= -->
+    <aside class="controls" id="controls">
+      <h2>Sumber sinyal</h2>
+      <div class="row">
+        <select id="source" aria-label="Sumber sinyal">
+          <option value="ecg">ECG sintetis (PQRST gaussian)</option>
+          <option value="sine">Sinus uji</option>
+        </select>
+      </div>
+      <div class="row only-ecg">
+        <label for="hr">Detak jantung <output id="hrVal"></output></label>
+        <input type="range" id="hr" min="40" max="150" step="1" value="72">
+      </div>
+      <div class="row only-sine" hidden>
+        <label for="sineFreq">Frekuensi sinus <output id="sineFreqVal"></output></label>
+        <input type="range" id="sineFreq" min="0.5" max="200" step="0.5" value="10">
+      </div>
+      <div class="row only-sine" hidden>
+        <label for="sineAmp">Amplitudo sinus (puncak) <output id="sineAmpVal"></output></label>
+        <input type="range" id="sineAmp" min="0.1" max="2" step="0.05" value="1">
+      </div>
+      <div class="row">
+        <span class="lbl">Durasi simulasi</span>
+        <select id="duration" aria-label="Durasi simulasi">
+          <option value="2">2 s</option>
+          <option value="5" selected>5 s</option>
+          <option value="10">10 s</option>
+        </select>
+      </div>
+
+      <h2>Gangguan</h2>
+      <div class="dist off" id="bwBox">
+        <label class="toggle"><input type="checkbox" id="bwOn"> Baseline wander (0,3 Hz)</label>
+        <div class="row sub">
+          <label for="bwAmp">Amplitudo <output id="bwAmpVal"></output></label>
+          <input type="range" id="bwAmp" min="0" max="1" step="0.01" value="0.3">
+        </div>
+      </div>
+      <div class="dist off" id="mainsBox">
+        <label class="toggle"><input type="checkbox" id="mainsOn"> Interferensi jala-jala 50 Hz</label>
+        <div class="row sub">
+          <label for="mainsAmp">Amplitudo <output id="mainsAmpVal"></output></label>
+          <input type="range" id="mainsAmp" min="0" max="0.5" step="0.01" value="0.1">
+        </div>
+      </div>
+      <div class="dist off" id="hfBox">
+        <label class="toggle"><input type="checkbox" id="hfOn"> Noise HF (putih)</label>
+        <div class="row sub">
+          <label for="hfRms">RMS <output id="hfRmsVal"></output></label>
+          <input type="range" id="hfRms" min="0" max="0.2" step="0.005" value="0.03">
+        </div>
+      </div>
+      <div class="dist off" id="aliasBox">
+        <label class="toggle"><input type="checkbox" id="aliasOn"> Komponen aliasing</label>
+        <div class="row sub">
+          <label for="aliasFreq">Frekuensi <output id="aliasFreqVal"></output></label>
+          <input type="range" id="aliasFreq" min="10" max="1000" step="1" value="80">
+        </div>
+        <div class="row sub">
+          <label for="aliasAmp">Amplitudo <output id="aliasAmpVal"></output></label>
+          <input type="range" id="aliasAmp" min="0" max="0.5" step="0.01" value="0.1">
+        </div>
+        <p class="hint sub">Nada di atas frekuensi Nyquist ADC. Contoh: 80 Hz yang dicuplik pada 100 Hz akan muncul sebagai 20 Hz (Eksperimen 3).</p>
+      </div>
+
+      <h2>Amplifier</h2>
+      <div class="row">
+        <span class="lbl">Gain <output id="gainVal"></output></span>
+        <div class="seg" role="radiogroup" aria-label="Pilihan gain">
+          <label><input type="radio" name="gainPreset" value="10">×10</label>
+          <label><input type="radio" name="gainPreset" value="100">×100</label>
+          <label><input type="radio" name="gainPreset" value="1000" checked>×1000</label>
+          <label><input type="radio" name="gainPreset" value="custom">Bebas</label>
+        </div>
+      </div>
+      <div class="row">
+        <label for="gainLog">Gain bebas (skala log) <output id="gainLogVal"></output></label>
+        <input type="range" id="gainLog" min="0" max="3.7" step="0.01" value="3">
+        <p class="hint">Menggeser slider otomatis memilih "Bebas". Saturasi keluaran: ±2 V.</p>
+      </div>
+
+      <h2>Filter (Eksperimen 2)</h2>
+      <div class="row">
+        <select id="fType" aria-label="Jenis filter">
+          <option value="none">Tanpa filter (bypass)</option>
+          <option value="lpf">Low-pass (LPF)</option>
+          <option value="hpf">High-pass (HPF)</option>
+          <option value="bpf" selected>Band-pass (BPF)</option>
+          <option value="notch">Notch (band-stop)</option>
+        </select>
+      </div>
+      <div class="row" data-ftype="lpf hpf bpf notch">
+        <span class="lbl">Preset</span>
+        <div class="presets" id="fPresets"></div>
+      </div>
+      <div class="row" data-ftype="lpf">
+        <label for="lpfFc">Cutoff fc <output id="lpfFcVal"></output></label>
+        <input type="range" id="lpfFc" min="0" max="2.7" step="0.001" value="1.602">
+      </div>
+      <div class="row" data-ftype="hpf">
+        <label for="hpfFc">Cutoff fc <output id="hpfFcVal"></output></label>
+        <input type="range" id="hpfFc" min="-1.301" max="1.699" step="0.001" value="-0.301">
+      </div>
+      <div class="row" data-ftype="bpf">
+        <label for="bpfLow"><span>Tepi bawah f<sub>L</sub></span> <output id="bpfLowVal"></output></label>
+        <input type="range" id="bpfLow" min="-1.301" max="1.699" step="0.001" value="-0.301">
+      </div>
+      <div class="row" data-ftype="bpf">
+        <label for="bpfHigh"><span>Tepi atas f<sub>H</sub></span> <output id="bpfHighVal"></output></label>
+        <input type="range" id="bpfHigh" min="0" max="2.7" step="0.001" value="1.602">
+      </div>
+      <div class="row" data-ftype="notch">
+        <label for="notchF0">Frekuensi tengah f0 <output id="notchF0Val"></output></label>
+        <input type="range" id="notchF0" min="1" max="2.7" step="0.001" value="1.699">
+      </div>
+      <div class="row" data-ftype="notch">
+        <label for="notchQ">Faktor kualitas Q <output id="notchQVal"></output></label>
+        <input type="range" id="notchQ" min="-0.301" max="2" step="0.001" value="1.477">
+      </div>
+      <p class="hint" id="fHint"></p>
+
+      <h2>ADC (Eksperimen 3)</h2>
+      <div class="row">
+        <span class="lbl">Laju sampling fs <output id="fsVal"></output></span>
+        <div class="seg" role="radiogroup" aria-label="Pilihan fs">
+          <label><input type="radio" name="fsPreset" value="100">100</label>
+          <label><input type="radio" name="fsPreset" value="250" checked>250</label>
+          <label><input type="radio" name="fsPreset" value="500">500</label>
+          <label><input type="radio" name="fsPreset" value="custom">Bebas</label>
+        </div>
+        <input type="range" id="fsFree" min="20" max="1000" step="1" value="250" aria-label="fs bebas">
+      </div>
+      <div class="row">
+        <span class="lbl">Resolusi <output id="bitsVal"></output></span>
+        <div class="seg" role="radiogroup" aria-label="Pilihan bit">
+          <label><input type="radio" name="bitsPreset" value="2">2</label>
+          <label><input type="radio" name="bitsPreset" value="4">4</label>
+          <label><input type="radio" name="bitsPreset" value="8">8</label>
+          <label><input type="radio" name="bitsPreset" value="12" checked>12</label>
+          <label><input type="radio" name="bitsPreset" value="custom">Bebas</label>
+        </div>
+        <input type="range" id="bitsFree" min="1" max="16" step="1" value="12" aria-label="Bit bebas">
+      </div>
+      <div class="row">
+        <label for="vRef">Rentang ADC <output id="vRefVal"></output></label>
+        <input type="range" id="vRef" min="0.1" max="5" step="0.05" value="2">
+      </div>
+      <div class="row"><label class="toggle"><input type="checkbox" id="aaOn"> Anti-aliasing LPF sebelum sampling</label>
+        <p class="hint" id="aaHint"></p></div>
+
+      <h2>Tampilan</h2>
+      <div class="row">
+        <span class="lbl">Jendela waktu</span>
+        <select id="window" aria-label="Jendela waktu">
+          <option value="all">Seluruh durasi</option>
+          <option value="2">0–2 s</option>
+          <option value="1">0–1 s</option>
+          <option value="0.5">0–0,5 s</option>
+          <option value="0.1">0–0,1 s</option>
+        </select>
+      </div>
+      <div class="row"><label class="toggle"><input type="checkbox" id="showClean" checked> Tampilkan sinyal bersih (tanpa gangguan)</label></div>
+      <div class="row"><label class="toggle"><input type="checkbox" id="showIdeal" checked> Tampilkan keluaran ideal (tanpa saturasi)</label></div>
+    </aside>
+
+    <!-- ================= PLOT ================= -->
+    <main class="main">
+      <div class="pipeline" id="pipeline" aria-label="Tahapan pipeline"></div>
+
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-tab="exp1">Eksperimen 1 · Sinyal &amp; Amplifier</button>
+        <button role="tab" aria-selected="false" data-tab="exp2">Eksperimen 2 · Filter</button>
+        <button role="tab" aria-selected="false" data-tab="exp3">Eksperimen 3 · ADC: Sampling &amp; Kuantisasi</button>
+        <button role="tab" aria-selected="false" data-tab="exp4">Eksperimen 4 · Output Digital</button>
+        <button role="tab" aria-selected="false" data-tab="valid">Validasi Matematis</button>
+      </div>
+
+      <section class="tabpanel" id="exp1" role="tabpanel">
+        <div class="plot-card">
+          <h3>Tahap 1 — Sinyal masukan (domain analog, 10 kHz)</h3>
+          <canvas class="plot" id="plotInput"></canvas>
+        </div>
+        <div class="plot-card">
+          <h3>Tahap 2 — Keluaran amplifier <span class="badge ok" id="satBadge">LINIER</span></h3>
+          <canvas class="plot" id="plotAmp"></canvas>
+        </div>
+        <div class="info-grid">
+          <div class="info"><h4>Karakteristik sinyal</h4><div id="infoSignal"></div></div>
+          <div class="info"><h4>Amplifier</h4><div id="infoAmp"></div></div>
+        </div>
+      </section>
+
+      <section class="tabpanel" id="exp2" role="tabpanel" hidden>
+        <p class="tip" id="noiseTip">Tidak ada gangguan aktif — yang terlihat hanyalah efek filter pada ECG bersih.
+          <button type="button" id="enableAllNoise">Aktifkan semua gangguan</button></p>
+        <div class="filter-summary" id="filterSummary"></div>
+
+        <div class="plot-card">
+          <h3>Respons frekuensi |H(f)|</h3>
+          <canvas class="plot" id="plotFreqResp"></canvas>
+        </div>
+        <div class="plot-card">
+          <h3>Spektrum amplitudo (FFT, jendela Hann) — sebelum vs sesudah filter</h3>
+          <canvas class="plot" id="plotSpectrum"></canvas>
+        </div>
+        <div class="plot-card">
+          <h3>Domain waktu — sinyal asli vs terfilter
+            <span class="plot-tools">
+              <select id="filtView" aria-label="Mode tampilan">
+                <option value="overlay">Overlay</option>
+                <option value="split">Terpisah</option>
+              </select>
+              <label><input type="checkbox" id="showRef"> referensi bersih (G × ECG murni)</label>
+            </span>
+          </h3>
+          <canvas class="plot" id="plotFiltA"></canvas>
+          <canvas class="plot" id="plotFiltB" hidden></canvas>
+        </div>
+
+        <div class="info-grid">
+          <div class="info"><h4>Respons terukur</h4><div id="infoFilterResp"></div></div>
+          <div class="info"><h4>Evaluasi terhadap referensi bersih</h4><div id="infoFilterEval"></div><ul class="notes" id="filterNotes"></ul></div>
+        </div>
+
+        <div class="explain">
+          <h4>Penjelasan</h4>
+          <div class="explain-grid">
+            <div class="xcard" data-xtype="lpf">
+              <h5>Low-pass (LPF)</h5>
+              <p><b>Mengurangi:</b> noise frekuensi tinggi (noise putih, artefak otot/EMG), serta interferensi 50 Hz dan komponen 80 Hz bila cutoff di bawahnya. Di depan ADC, LPF berperan sebagai filter <i>anti-aliasing</i>.</p>
+              <p><b>Pilihan umum:</b> 40 Hz untuk mode monitor (tampilan bersih), 100–150 Hz untuk mode diagnostik.</p>
+              <p><b>Risiko:</b> energi kompleks QRS membentang hingga ±40–100 Hz. Cutoff terlalu rendah memotong puncak R (lebih pendek dan lebih lebar), menghilangkan notch/slur QRS dan spike pacu jantung. Coba preset 15 Hz.</p>
+              <p><b>Catatan:</b> LPF 40 Hz orde 2 hanya meredam 50 Hz sekitar 5 dB — transisinya terlalu landai; untuk jala-jala lebih efektif notch.</p>
+            </div>
+            <div class="xcard" data-xtype="hpf">
+              <h5>High-pass (HPF)</h5>
+              <p><b>Mengurangi:</b> baseline wander (napas ±0,15–0,3 Hz, gerak elektroda, perubahan impedansi kulit) dan offset DC elektroda.</p>
+              <p><b>Pilihan umum:</b> 0,5 Hz pada monitor; 0,05 Hz untuk EKG diagnostik agar segmen ST tetap utuh.</p>
+              <p><b>Risiko:</b> segmen ST dan gelombang T adalah bagian ECG yang berubah paling lambat (komponen &lt; 1 Hz). HPF 5 Hz membuang komponen ini, dan karena fase filter IIR kausal tidak linear, muncul <i>undershoot</i> setelah QRS → elevasi/depresi ST semu yang dapat disalahartikan sebagai iskemia; gelombang P dan T mengecil serta berubah bentuk.</p>
+            </div>
+            <div class="xcard" data-xtype="bpf">
+              <h5>Band-pass (BPF)</h5>
+              <p><b>Mengurangi:</b> gabungan HPF + LPF — baseline wander sekaligus noise frekuensi tinggi.</p>
+              <p><b>0,5–40 Hz:</b> pita mode monitor yang umum.</p>
+              <p><b>5–15 Hz:</b> pita yang dipakai algoritma deteksi QRS (mis. Pan–Tompkins). QRS menonjol dibanding P, T, dan noise sehingga detak mudah dideteksi, tetapi morfologi rusak: R tinggal ±40 %, P dan T nyaris hilang. Sinyal ini untuk diolah mesin, <b>bukan</b> untuk ditampilkan atau didiagnosis.</p>
+            </div>
+            <div class="xcard" data-xtype="notch">
+              <h5>Notch (band-stop)</h5>
+              <p><b>Mengurangi:</b> interferensi jala-jala 50 Hz (Indonesia; 60 Hz di Amerika) dari kopling kapasitif kabel listrik ke tubuh dan kabel elektroda.</p>
+              <p><b>Q = 30:</b> takik sempit (BW ≈ f0/Q ≈ 1,7 Hz) — 50 Hz hilang, ECG hampir utuh.</p>
+              <p><b>Q = 5:</b> takik lebar (±45–55 Hz) ikut memakan komponen QRS di sekitar 50 Hz dan menimbulkan <i>ringing</i> setelah QRS.</p>
+              <p>Notch tidak membantu terhadap harmonik (100, 150 Hz), noise putih, atau baseline.</p>
+            </div>
+            <div class="xcard general">
+              <h5>Mengapa sinyal yang lebih halus belum tentu lebih baik</h5>
+              <ul>
+                <li><b>Spektrum tumpang tindih.</b> Baseline wander menimpa pita ST/T, EMG menimpa pita QRS, dan 50 Hz berada di tengah pita QRS. Filter tidak dapat membedakan sinyal dan noise pada frekuensi yang sama — yang dibuang dari pita itu selalu keduanya.</li>
+                <li><b>Informasi ada di detail.</b> Amplitudo dan lebar QRS, level ST (ambang klinis sekitar ±0,1 mV), notch kecil, dan bentuk gelombang P/T. Tampilan yang "rapi" dapat menyembunyikan atau bahkan menciptakan kelainan.</li>
+                <li><b>Filter kausal menambah delay dan distorsi fase</b> — makin rendah cutoff LPF atau makin tinggi cutoff HPF, makin besar efeknya.</li>
+                <li><b>Ukur, jangan hanya dilihat.</b> Bandingkan dengan referensi bersih: filter yang baik menaikkan SNR terhadap referensi tanpa mengubah tinggi R dan level ST.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="tabpanel" id="exp3" role="tabpanel" hidden>
+        <div class="alias-banner" id="aliasBanner"></div>
+        <p class="tip">Coba skenario aliasing:
+          <button type="button" id="aliasScenario">Alias 80 Hz, fs = 100 Hz, filter Eksp. 2 dimatikan</button></p>
+        <div class="filter-summary" id="adcSummary"></div>
+
+        <div class="plot-card">
+          <h3>Sinyal kontinu + sampel terkuantisasi
+            <span class="plot-tools">
+              <select id="adcYView" aria-label="Skala sumbu Y">
+                <option value="signal">Zoom ke sinyal</option>
+                <option value="range">Rentang ADC penuh</option>
+              </select>
+              <label><input type="checkbox" id="showZoh" checked> rekonstruksi ZOH</label>
+            </span>
+          </h3>
+          <canvas class="plot" id="plotAdc"></canvas>
+          <p class="hint">Tip: pilih jendela waktu 0–0,5 s atau 0–0,1 s (kolom kiri) agar tiap sampel tampil sebagai stem. Garis level kuantisasi digambar bila cukup renggang.</p>
+        </div>
+        <div class="plot-card">
+          <h3><span>Error kuantisasi e[n] = x<sub>q</sub>[n] − x[n]</span></h3>
+          <canvas class="plot" id="plotQErr"></canvas>
+        </div>
+        <div class="plot-card">
+          <h3>Spektrum — masukan analog vs hasil sampling (sumbu linear)</h3>
+          <canvas class="plot" id="plotAdcSpec"></canvas>
+        </div>
+
+        <div class="info-grid">
+          <div class="info"><h4>Sampling</h4><div id="infoSampling"></div></div>
+          <div class="info"><h4>Kuantisasi</h4><div id="infoQuant"></div></div>
+        </div>
+
+        <div class="info" style="margin-top:14px"><h4>Deteksi aliasing (komponen &gt; fs/2)</h4><div id="aliasTable"></div><ul class="notes" id="adcNotes"></ul></div>
+
+        <div class="info" style="margin-top:14px"><h4>20 sampel pertama</h4><div class="table-scroll" id="sampleTable"></div></div>
+
+        <div class="explain">
+          <h4>Penjelasan</h4>
+          <div class="explain-grid">
+            <div class="xcard">
+              <h5>Pengaruh fs pada jumlah sampel dan representasi</h5>
+              <p>Jumlah sampel = durasi × fs. Untuk 5 s: 500 sampel pada 100 Hz, 1.250 pada 250 Hz, 2.500 pada 500 Hz — data dan beban penyimpanan naik sebanding dengan fs.</p>
+              <p>fs rendah membuat QRS yang sempit (±100 ms) hanya terwakili sedikit sampel: puncak R bisa "terlewat" karena sampel tidak jatuh tepat di puncaknya, sehingga amplitudo dan bentuk QRS berubah. EKG diagnostik umumnya memakai ≥ 500 Hz; monitor ±250 Hz.</p>
+            </div>
+            <div class="xcard">
+              <h5>Kapan aliasing terjadi</h5>
+              <p>Teorema Nyquist–Shannon: komponen berfrekuensi f hanya terwakili benar bila f &lt; fs/2. Komponen di atas fs/2 tidak hilang, tetapi <b>terlipat</b> ke f<sub>alias</sub> = |f − k·fs| (k = bilangan bulat terdekat f/fs) dan tidak dapat dibedakan dari sinyal asli.</p>
+              <p>Contoh: 80 Hz pada fs = 100 Hz → 20 Hz, tepat di pita ECG. Setelah sampling, alias tidak bisa dibuang dengan filter digital apa pun — karena itu LPF anti-aliasing harus dipasang <b>sebelum</b> ADC. Noise putih pita lebar selalu ikut terlipat dan menaikkan lantai noise.</p>
+            </div>
+            <div class="xcard">
+              <h5>Pengaruh bit depth pada level dan error</h5>
+              <p>N bit → 2<sup>N</sup> level; LSB Δ = rentang / 2<sup>N</sup>. Setiap tambahan 1 bit membagi dua Δ dan menaikkan SQNR ±6 dB (6,02·N + 1,76 dB untuk sinus skala penuh).</p>
+              <p>Error kuantisasi berada di ±Δ/2 dengan RMS ≈ Δ/√12 — selama sinyal tidak ter-clip. Model "noise seragam" ini hanya berlaku bila sinyal melintasi banyak level; pada 2–4 bit error berkorelasi dengan sinyal (bentuk tangga terlihat jelas).</p>
+              <p>Rentang ADC harus cocok dengan sinyal: terlalu lebar → hanya sebagian kecil level terpakai (SQNR turun); terlalu sempit → clipping.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="tabpanel" id="exp4" role="tabpanel" hidden>
+        <div class="preset-box">
+          <div>
+            <b>Konfigurasi rekomendasi (monitor ECG)</b>
+            <p class="hint">Gain ×1000 · BPF 0,5–40 Hz · anti-aliasing aktif · fs 250 Hz · 12 bit · rentang ±2 V.
+              Gangguan dan sumber sinyal tidak diubah.</p>
+          </div>
+          <button type="button" id="applyRecommended" class="primary">Terapkan konfigurasi rekomendasi</button>
+        </div>
+
+        <div class="info"><h4>Ringkasan konfigurasi <span class="badge" id="cfgBadge"></span></h4><div id="cfgSummary"></div></div>
+
+        <div class="plot-card" style="margin-top:14px">
+          <h3>Output digital — kode ADC terhadap waktu</h3>
+          <canvas class="plot" id="plotCodes"></canvas>
+        </div>
+
+        <div class="info">
+          <h4>Ekspor data</h4>
+          <div class="export-row">
+            <button type="button" id="exportCsv" class="primary">Unduh CSV</button>
+            <span class="hint" id="csvInfo"></span>
+          </div>
+          <pre class="csv-preview" id="csvPreview"></pre>
+        </div>
+
+        <div class="info" style="margin-top:14px"><h4>20 sampel pertama</h4><div class="table-scroll" id="outTable"></div></div>
+
+        <div class="explain">
+          <h4>Alasan konfigurasi rekomendasi</h4>
+          <div class="explain-grid">
+            <div class="xcard"><h5>Gain ×1000</h5><p>R ≈ 1 mV menjadi ≈ 1 V: memakai separuh rentang ADC ±2 V dan menyisakan ruang untuk baseline wander serta noise sebelum saturasi.</p></div>
+            <div class="xcard"><h5>BPF 0,5–40 Hz</h5><p>Pita monitor: HPF 0,5 Hz menekan baseline wander, LPF 40 Hz menekan noise HF dan sebagian 50 Hz, sambil mempertahankan bentuk QRS (puncak R ±95 %). Untuk EKG diagnostik dipakai 0,05–150 Hz.</p></div>
+            <div class="xcard"><h5>fs 250 Hz + anti-aliasing</h5><p>Nyquist 125 Hz jauh di atas pita 40 Hz; AA LPF orde 8 (fc 100 Hz) meredam noise pita lebar sebelum sampling, tetapi tidak total: ≈ −15,6 dB di Nyquist (125 Hz) dan baru ≈ −48 dB di 200 Hz (0,8·fs), sehingga komponen di antaranya masih dapat terlipat sebagian. Satu QRS terwakili ±25 sampel.</p></div>
+            <div class="xcard"><h5>12 bit, ±2 V</h5><p>LSB 0,98 mV di keluaran ≈ 0,98 µV dirujuk ke elektroda — jauh di bawah amplitudo gelombang P (±0,15 mV). Laju data 250 × 12 = 3.000 bit/s.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tabpanel" id="valid" role="tabpanel" hidden>
+        <p class="hint" style="margin-top:0">Setiap baris membandingkan rumus teori dengan hasil simulasi yang benar-benar dijalankan. Diperbarui setiap kali parameter berubah.</p>
+
+        <div class="info"><h4>(a) Amplifier: V<sub>out</sub> = G·V<sub>in</sub>, dibatasi ±V<sub>sat</sub></h4><div id="valAmp"></div></div>
+
+        <div class="info" style="margin-top:14px">
+          <h4>(b) Filter RC orde 1: f<sub>c</sub> = 1 / (2πRC)</h4>
+          <div class="rc-inputs">
+            <label>R <input type="number" id="rcR" value="39.79" min="0.001" step="any"> kΩ</label>
+            <label>C <input type="number" id="rcC" value="0.1" min="0.000001" step="any"> µF</label>
+            <span class="hint" id="rcInfo"></span>
+          </div>
+          <div id="valRc"></div>
+          <div id="valFilter"></div>
+        </div>
+
+        <div class="info" style="margin-top:14px"><h4>(c) ADC: level, LSB, error, SQNR <span class="hint" id="adcValInfo"></span></h4><div id="valAdc"></div></div>
+      </section>
+    </main>
+  </div>
+
+  <footer>Model edukatif · domain analog disimulasikan pada 10 kHz · semua perhitungan berjalan di peramban.</footer>
+
+  <script type="module" src="js/ui.js"></script>
+</body>
+</html>
