@@ -46,6 +46,7 @@ export const FILTER_PRESETS = Object.freeze({
     { label: '40 Hz (monitor)', fc: 40 },
     { label: '100 Hz (diagnostik)', fc: 100 },
     { label: '15 Hz (terlalu rendah)', fc: 15 },
+    { label: '30 Hz (EOG)', fc: 30 },
   ],
   hpf: [
     { label: '0,5 Hz (monitor)', fc: 0.5 },
@@ -55,11 +56,27 @@ export const FILTER_PRESETS = Object.freeze({
   bpf: [
     { label: '0,5–40 Hz (monitor)', fLow: 0.5, fHigh: 40 },
     { label: '5–15 Hz (deteksi QRS)', fLow: 5, fHigh: 15 },
+    { label: '20–450 Hz (EMG)', fLow: 20, fHigh: 450 },
+    { label: '0,5–70 Hz (EEG)', fLow: 0.5, fHigh: 70 },
+    { label: '0,05–30 Hz (EOG)', fLow: 0.05, fHigh: 30 },
   ],
   notch: [
     { label: '50 Hz, Q = 30', f0: 50, q: 30 },
     { label: '50 Hz, Q = 5', f0: 50, q: 5 },
   ],
+});
+
+/**
+ * Batas slider filter di UI [min, maks] dalam Hz (skala log). Satu sumber kebenaran:
+ * ui.js menyetel atribut slider dari sini, tes memeriksa preset profil berada di dalamnya.
+ */
+export const FILTER_LIMITS = Object.freeze({
+  lpf: Object.freeze([1, 500]),
+  hpf: Object.freeze([0.05, 50]),
+  bpfLow: Object.freeze([0.05, 50]),
+  bpfHigh: Object.freeze([1, 500]),
+  notchF0: Object.freeze([10, 500]),
+  notchQ: Object.freeze([0.5, 100]), // tak berdimensi
 });
 
 export const DEFAULT_FILTER_PARAMS = Object.freeze({
@@ -68,6 +85,9 @@ export const DEFAULT_FILTER_PARAMS = Object.freeze({
   hpf: { fc: 0.5 },
   bpf: { fLow: 0.5, fHigh: 40 },
   notch: { f0: 50, q: 30 },
+  // Ekstensi aditif: bila true, satu section notch (parameter `notch`) ditambahkan di
+  // akhir kaskade jenis LPF/HPF/BPF — mis. "BPF 20–450 Hz + notch 50 Hz".
+  addNotch: false,
 });
 
 // ---------------------------------------------------------------------------
@@ -126,10 +146,30 @@ const id = (v) => String(v).replace('.', ',');
 
 /**
  * Menerjemahkan parameter UI menjadi daftar section biquad.
- * @returns {{ type, sections: Array<{b,a}>, label: string, design: object }}
+ * Dengan `addNotch` section notch ditambahkan di akhir; `baseSections` selalu berisi
+ * kaskade TANPA notch tambahan (untuk mengukur tepi pita tanpa tercampur takik notch).
+ * @returns {{ type, sections: Array<{b,a}>, baseSections: Array<{b,a}>,
+ *             notchSection?: {b,a}, label: string, design: object }}
  */
 export function designFilter(params, fs) {
   const p = { ...DEFAULT_FILTER_PARAMS, ...params };
+  const base = designBaseFilter(p, fs);
+  base.baseSections = base.sections;
+  if (!p.addNotch || p.type === 'notch') return base; // perilaku v1 tidak berubah
+  const { f0, q } = p.notch;
+  const notchSection = designNotch(f0, fs, q);
+  return {
+    ...base,
+    label: base.type === 'none'
+      ? `Notch orde 2, f0 = ${id(f0)} Hz, Q = ${id(q)}`
+      : `${base.label} + notch ${id(f0)} Hz (Q = ${id(q)})`,
+    design: { ...base.design, notch: { f0, q, bw: f0 / q } },
+    sections: [...base.sections, notchSection],
+    notchSection,
+  };
+}
+
+function designBaseFilter(p, fs) {
   switch (p.type) {
     case 'lpf':
       return {

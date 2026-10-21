@@ -2,39 +2,29 @@
  * ui.js — Antarmuka: membaca kontrol, menjalankan pipeline, menggambar plot canvas
  * dan panel info. Seluruh perhitungan sinyal didelegasikan ke modul murni lain;
  * file ini hanya berurusan dengan DOM dan penggambaran.
+ *
+ * Jenis sinyal (ECG, EMG, EEG, EOG, sinus uji) dipilih lewat PROFIL (js/profiles/):
+ * kontrol sinyal, daftar gangguan, preset rekomendasi, batas slider, dan teks info
+ * semuanya dibangun dari definisi profil aktif — tidak ada kode khusus per sinyal di sini.
  */
 
 import { runPipeline, STAGE_DEFS } from './pipeline.js';
 import { FS_ANALOG, ecgCharacteristics, signalStats, snrDb, detectRPeaks } from './signal.js';
-import { V_SAT } from './amplifier.js';
 import {
-  FILTER_PRESETS, logspace, frequencyResponse, magnitudeDb, measureMinus3dB,
+  FILTER_PRESETS, FILTER_LIMITS, logspace, frequencyResponse, magnitudeDb, measureMinus3dB,
   amplitudeSpectrum, filterQualityMetrics,
 } from './filters.js';
-import { analyzeAliasing, powerAboveNyquist, toBinary, adcToCsv } from './adc.js';
-import { validateAmplifier, validateRc, validateAdc, validateAdcSignal } from './validation.js';
+import { analyzeAliasing, powerAboveNyquist, toBinary, adcToCsv, designAntiAlias } from './adc.js';
+import { validateAmplifier, validateRc, validateAdc, validateAdcSignal, RC_FC_MIN } from './validation.js';
+import { fmt, fmtSig, fmtTrim, mV, ms, hz, sig3, fmtVolt, voltUnit } from './format.js';
+import { PROFILES, getProfile, DEFAULT_PROFILE_ID } from './profiles/index.js';
+import { presetFilterParams } from './profiles/params.js';
+import { MODEL_NOTES, leadWaveAmplitudes } from './cardiac-dipole.js';
 
 const $ = (id) => document.getElementById(id);
 
-// ---------------------------------------------------------------------------
-// Format angka (gaya Indonesia: koma desimal, titik ribuan)
-// ---------------------------------------------------------------------------
-function fmt(v, digits = 2) {
-  if (v === Infinity) return '∞';
-  if (v === -Infinity) return '−∞';
-  if (!Number.isFinite(v)) return '–';
-  return v.toLocaleString('id-ID', { minimumFractionDigits: digits, maximumFractionDigits: digits });
-}
-const mV = (v, d = 2) => `${fmt(v * 1e3, d)} mV`;
-const ms = (v) => `${fmt(v * 1e3, 0)} ms`;
-/** Tiga angka penting: 40 → "40,0", 0.5 → "0,500", 100 → "100". */
-function fmtSig(v) {
-  if (!Number.isFinite(v) || v <= 0) return fmt(v, 2);
-  v = Number(v.toPrecision(3)); // 9,998 → 10,0 (bukan 10,00)
-  return fmt(v,Math.min(3, Math.max(0, 2 - Math.floor(Math.log10(v)))));
-}
-const hz = (v) => `${fmtSig(v)} Hz`;
-const sig3 = (v) => Number(v.toPrecision(3));
+/** Profil sinyal yang sedang aktif. */
+let profile = getProfile(DEFAULT_PROFILE_ID);
 
 // ---------------------------------------------------------------------------
 // Membaca parameter dari kontrol
@@ -65,41 +55,49 @@ const PRESET_FIELDS = {
 };
 
 function readFilterParams() {
+  const type = $('fType').value;
   return {
-    type: $('fType').value,
+    type,
     lpf: { fc: logVal('lpfFc') },
     hpf: { fc: logVal('hpfFc') },
     bpf: { fLow: logVal('bpfLow'), fHigh: logVal('bpfHigh') },
     notch: { f0: logVal('notchF0'), q: logVal('notchQ') },
+    addNotch: $('fAddNotch').checked && ['lpf', 'hpf', 'bpf'].includes(type),
   };
 }
 
+/** Nilai satu kontrol sinyal profil (SI untuk slider, string untuk select, boolean untuk check). */
+function readControl(c) {
+  const el = $(`ctl_${c.key}`);
+  if (c.type === 'check') return el.checked;
+  if (c.type === 'select') return el.value;
+  return Number(el.value) * c.toSI;
+}
+const controlValue = (key) => readControl(profile.controls.find((c) => c.key === key));
+
+function readSignalParams() {
+  const sig = { source: profile.id, duration: Number($('duration').value), fs: FS_ANALOG };
+  for (const c of profile.controls) sig[c.key] = readControl(c);
+  const dist = {};
+  for (const d of profile.disturbances) {
+    const o = { on: $(`dist_${d.id}_on`).checked, ...(d.fixed ?? {}) };
+    for (const s of d.sliders) o[s.key] = Number($(`dist_${d.id}_${s.key}`).value) * s.toSI;
+    dist[d.id] = o;
+  }
+  sig.disturbances = dist;
+  return sig;
+}
+
 function readParams() {
-  const num = (id) => Number($(id).value);
-  const on = (id) => $(id).checked;
   return {
-    signal: {
-      source: $('source').value,
-      duration: num('duration'),
-      fs: FS_ANALOG,
-      hr: num('hr'),
-      rAmp: 1e-3,
-      sineFreq: num('sineFreq'),
-      sineAmp: num('sineAmp') * 1e-3,
-      disturbances: {
-        baseline: { on: on('bwOn'), amp: num('bwAmp') * 1e-3, freq: 0.3 },
-        mains: { on: on('mainsOn'), amp: num('mainsAmp') * 1e-3, freq: 50 },
-        hf: { on: on('hfOn'), rms: num('hfRms') * 1e-3, seed: 12345 },
-        alias: { on: on('aliasOn'), amp: num('aliasAmp') * 1e-3, freq: num('aliasFreq') },
-      },
-    },
-    amplifier: { gain: currentGain(), vSat: V_SAT },
+    signal: readSignalParams(),
+    amplifier: { gain: currentGain(), vSat: Number($('vSat').value) },
     filter: readFilterParams(),
     adc: {
       fs: currentFs(),
       bits: currentBits(),
-      vRef: num('vRef'),
-      antiAlias: on('aaOn'),
+      vRef: Number($('vRef').value),
+      antiAlias: $('aaOn').checked,
       aaOrder: 8,
       aaRatio: 0.4,
     },
@@ -123,26 +121,142 @@ function applyPreset(type, idx) {
   for (const [k, id] of Object.entries(PRESET_FIELDS[type])) $(id).value = Math.log10(p[k]);
 }
 
+// ---------------------------------------------------------------------------
+// Profil sinyal: kontrol dinamis, batas slider, penerapan preset
+// ---------------------------------------------------------------------------
+function controlHtml(c) {
+  const id = `ctl_${c.key}`;
+  if (c.type === 'range') {
+    return `<div class="row" data-ctl="${c.key}"><label for="${id}">${c.label} <output id="${id}_val"></output></label>`
+      + `<input type="range" id="${id}" min="${c.min}" max="${c.max}" step="${c.step}" value="${c.def}"></div>`;
+  }
+  if (c.type === 'select') {
+    // opsi [nilai, label, grup?]: bila ada grup, opsi dibungkus <optgroup> (urutan kemunculan)
+    const opt = ([v, l]) => `<option value="${v}"${v === c.def ? ' selected' : ''}>${l}</option>`;
+    let body = '';
+    if (c.options.some((o) => o[2])) {
+      const groups = new Map();
+      for (const o of c.options) { if (!groups.has(o[2])) groups.set(o[2], []); groups.get(o[2]).push(o); }
+      body = [...groups].map(([g, os]) => `<optgroup label="${g}">${os.map(opt).join('')}</optgroup>`).join('');
+    } else {
+      body = c.options.map(opt).join('');
+    }
+    return `<div class="row" data-ctl="${c.key}"><label for="${id}">${c.label}</label><select id="${id}">${body}</select></div>`;
+  }
+  return `<div class="row" data-ctl="${c.key}"><label class="toggle"><input type="checkbox" id="${id}"${c.def ? ' checked' : ''}> ${c.label}</label></div>`;
+}
+
+function distHtml(d) {
+  const sliders = d.sliders.map((s) => {
+    const id = `dist_${d.id}_${s.key}`;
+    return `<div class="row sub"><label for="${id}">${s.label} <output id="${id}_val"></output></label>`
+      + `<input type="range" id="${id}" min="${s.min}" max="${s.max}" step="${s.step}" value="${s.def}"></div>`;
+  }).join('');
+  return `<div class="dist off" id="dist_${d.id}"><label class="toggle"><input type="checkbox" id="dist_${d.id}_on"> ${d.label}</label>`
+    + `${sliders}${d.hint ? `<p class="hint sub">${d.hint}</p>` : ''}</div>`;
+}
+
+/** Membangun ulang kontrol sinyal dan gangguan untuk profil aktif (nilai = bawaan profil). */
+function renderProfileControls() {
+  $('profileControls').innerHTML = profile.controls.map(controlHtml).join('');
+  $('disturbBox').innerHTML = profile.disturbances.map(distHtml).join('');
+  $('profileHint').textContent = profile.deskripsi;
+  $('hdrSig').textContent = profile.singkat;
+  $('sigTitle').textContent = profile.singkat;
+}
+
+/** Batas slider filter dari FILTER_LIMITS (satu sumber kebenaran dengan tes). */
+function applyFilterLimits() {
+  const L = FILTER_LIMITS;
+  const set = (id, [lo, hi]) => {
+    const el = $(id);
+    el.min = Math.log10(lo);
+    el.max = Math.log10(hi);
+    el.step = 'any'; // tanpa pembulatan ke kelipatan step: nilai preset tepat (mis. 450 Hz)
+  };
+  set('lpfFc', L.lpf); set('hpfFc', L.hpf); set('bpfLow', L.bpfLow); set('bpfHigh', L.bpfHigh);
+  set('notchF0', L.notchF0); set('notchQ', L.notchQ);
+}
+
+/** Batas slider rail amplifier dan rentang ADC mengikuti profil. */
+function applyProfileLimits() {
+  const { vSat, vRef } = profile.limits;
+  $('vSat').min = vSat[0]; $('vSat').max = vSat[1];
+  $('vRef').min = vRef[0]; $('vRef').max = vRef[1];
+}
+
+function setRadio(name, value) {
+  document.querySelector(`input[name=${name}][value="${value}"]`).checked = true;
+}
+
+/** Menyetel kontrol gain/rail/filter/ADC sesuai preset (konfigurasi rekomendasi) profil. */
+function applyPresetToControls(pr) {
+  setRadio('gainPreset', [10, 100, 1000].includes(pr.gain) ? pr.gain : 'custom');
+  $('gainLog').value = Math.log10(pr.gain);
+  $('vSat').value = pr.vSat;
+
+  const f = presetFilterParams(pr);
+  $('fType').value = f.type;
+  $('lpfFc').value = Math.log10(f.lpf.fc);
+  $('hpfFc').value = Math.log10(f.hpf.fc);
+  $('bpfLow').value = Math.log10(f.bpf.fLow);
+  $('bpfHigh').value = Math.log10(f.bpf.fHigh);
+  $('notchF0').value = Math.log10(f.notch.f0);
+  $('notchQ').value = Math.log10(f.notch.q);
+  $('fAddNotch').checked = !!f.addNotch;
+
+  setRadio('fsPreset', [100, 250, 500].includes(pr.fs) ? pr.fs : 'custom');
+  $('fsFree').value = pr.fs;
+  setRadio('bitsPreset', [2, 4, 8, 12].includes(pr.bits) ? pr.bits : 'custom');
+  $('bitsFree').value = pr.bits;
+  $('vRef').value = pr.vRef;
+  $('aaOn').checked = pr.antiAlias;
+}
+
+/** Ringkasan satu baris preset, mis. "Gain ×1.000 · BPF 0,5–40 Hz + notch 50 Hz · …". */
+function presetSummary(pr) {
+  const f = presetFilterParams(pr);
+  const num = (v) => fmtTrim(v);
+  const ft = {
+    none: 'tanpa filter',
+    lpf: `LPF ${num(f.lpf.fc)} Hz`,
+    hpf: `HPF ${num(f.hpf.fc)} Hz`,
+    bpf: `BPF ${num(f.bpf.fLow)}–${num(f.bpf.fHigh)} Hz`,
+    notch: `notch ${num(f.notch.f0)} Hz`,
+  }[f.type];
+  const nt = f.addNotch ? ` + notch ${num(f.notch.f0)} Hz` : '';
+  return `Gain ×${pr.gain.toLocaleString('id-ID')} · ${ft}${nt} · anti-aliasing ${pr.antiAlias ? 'aktif' : 'mati'}`
+    + ` · fs ${pr.fs.toLocaleString('id-ID')} Hz · ${pr.bits} bit · rentang ADC ±${fmtTrim(pr.vRef)} V · rail amplifier ±${fmtTrim(pr.vSat)} V.`;
+}
+
+/** Mengganti profil: bangun kontrol, terapkan preset, durasi bawaan. */
+function switchProfile(id) {
+  profile = getProfile(id);
+  $('profile').value = profile.id;
+  renderProfileControls();
+  applyProfileLimits();
+  $('duration').value = String(profile.defaultDuration);
+  applyPresetToControls(profile.preset);
+  renderPipeline();
+}
+
 /** Memperbarui label nilai slider dan status tampil/sembunyi kontrol. */
 function syncControls() {
-  $('hrVal').textContent = `${$('hr').value} bpm`;
-  $('sineFreqVal').textContent = `${fmt(Number($('sineFreq').value), 1)} Hz`;
-  $('sineAmpVal').textContent = `${fmt(Number($('sineAmp').value), 2)} mV`;
-  $('bwAmpVal').textContent = `${fmt(Number($('bwAmp').value), 2)} mV`;
-  $('mainsAmpVal').textContent = `${fmt(Number($('mainsAmp').value), 2)} mV`;
-  $('hfRmsVal').textContent = `${fmt(Number($('hfRms').value), 3)} mV`;
-  $('aliasFreqVal').textContent = `${$('aliasFreq').value} Hz`;
-  $('aliasAmpVal').textContent = `${fmt(Number($('aliasAmp').value), 2)} mV`;
+  for (const c of profile.controls) {
+    if (c.showIf) {
+      document.querySelector(`[data-ctl="${c.key}"]`).hidden = !Object.entries(c.showIf).every(([k, v]) => controlValue(k) === v);
+    }
+    if (c.type === 'range') $(`ctl_${c.key}_val`).textContent = `${fmt(Number($(`ctl_${c.key}`).value), c.digits ?? 2)} ${c.unit}`;
+  }
+  for (const d of profile.disturbances) {
+    $(`dist_${d.id}`).classList.toggle('off', !$(`dist_${d.id}_on`).checked);
+    for (const s of d.sliders) {
+      $(`dist_${d.id}_${s.key}_val`).textContent = `${fmt(Number($(`dist_${d.id}_${s.key}`).value), s.digits ?? 2)} ${s.unit}`;
+    }
+  }
   $('gainLogVal').textContent = `×${Math.round(10 ** Number($('gainLog').value)).toLocaleString('id-ID')}`;
   $('gainVal').textContent = `×${currentGain().toLocaleString('id-ID')}`;
-
-  const isSine = $('source').value === 'sine';
-  document.querySelectorAll('.only-ecg').forEach((el) => { el.hidden = isSine; });
-  document.querySelectorAll('.only-sine').forEach((el) => { el.hidden = !isSine; });
-
-  for (const k of ['bw', 'mains', 'hf', 'alias']) {
-    $(`${k}Box`).classList.toggle('off', !$(`${k}On`).checked);
-  }
+  $('vSatVal').textContent = `±${fmtTrim(Number($('vSat').value))} V`;
 
   // --- Filter ---
   const f = readFilterParams();
@@ -152,8 +266,9 @@ function syncControls() {
   $('bpfHighVal').textContent = hz(f.bpf.fHigh);
   $('notchF0Val').textContent = hz(f.notch.f0);
   $('notchQVal').textContent = fmtSig(f.notch.q);
+  const visibleTypes = f.addNotch ? [f.type, 'notch'] : [f.type];
   document.querySelectorAll('[data-ftype]').forEach((el) => {
-    el.hidden = !el.dataset.ftype.split(' ').includes(f.type);
+    el.hidden = !el.dataset.ftype.split(' ').some((t) => visibleTypes.includes(t));
   });
   renderPresets(f.type);
   document.querySelectorAll('#fPresets button').forEach((b) => {
@@ -168,14 +283,19 @@ function syncControls() {
       : '⚠ Tepi bawah harus lebih kecil dari tepi atas — pita kosong, hampir semua sinyal teredam.',
     notch: `Lebar pita −3 dB ≈ f0/Q = ${hz(f.notch.f0 / f.notch.q)}.`,
   };
-  $('fHint').textContent = hints[f.type];
+  $('fHint').textContent = hints[f.type]
+    + (f.addNotch ? ` + notch ${hz(f.notch.f0)}, Q = ${fmtSig(f.notch.q)} (BW ≈ ${hz(f.notch.f0 / f.notch.q)}).` : '');
 
   // --- ADC ---
   const fsAdc = currentFs(), bits = currentBits();
   $('fsVal').textContent = `${fsAdc.toLocaleString('id-ID')} Hz`;
   $('bitsVal').textContent = `${bits} bit · ${(2 ** bits).toLocaleString('id-ID')} level`;
-  $('vRefVal').textContent = `±${fmt(Number($('vRef').value), 2)} V`;
-  $('aaHint').textContent = `Butterworth orde 8, fc = 0,4·fs = ${hz(0.4 * fsAdc)}: ≈ −15,6 dB di fs/2, ≈ −48 dB baru di 0,8·fs.`;
+  $('vRefVal').textContent = `±${fmtTrim(Number($('vRef').value))} V`;
+  // Redaman AA dihitung dari desain filter sebenarnya: bergantung pada fs (warping bilinear
+  // pada domain analog 10 kHz), ≈ −15,6 dB di fs/2 untuk fs ≤ 500 Hz tetapi lebih curam di fs tinggi.
+  const aa = designAntiAlias(fsAdc, FS_ANALOG);
+  $('aaHint').textContent = `Butterworth orde 8, fc = 0,4·fs = ${hz(aa.fc)}: ${fmt(magnitudeDb(aa.sections, FS_ANALOG, fsAdc / 2), 1)} dB di fs/2, `
+    + `${fmt(magnitudeDb(aa.sections, FS_ANALOG, 0.8 * fsAdc), 0)} dB di 0,8·fs.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,54 +703,34 @@ function table3(head, rows) {
 function renderInfo(result) {
   const { ecg, amp } = result.stages;
   const p = ecg.params;
-  const rows = [];
+  const prof = getProfile(p.source);
 
-  if (p.source === 'ecg') {
-    const c = ecgCharacteristics({ hr: p.hr, rAmp: p.rAmp });
-    const peaks = detectRPeaks(ecg.clean, ecg.fs);
-    let hrDet = NaN;
-    if (peaks.length >= 2) hrDet = 60 / ((peaks[peaks.length - 1] - peaks[0]) / (peaks.length - 1) / ecg.fs);
-    rows.push(
-      ['Sumber', 'ECG sintetis (5 gaussian P, Q, R, S, T)'],
-      ['Detak jantung (HR)', `${fmt(c.hr, 0)} bpm`],
-      ['HR terdeteksi dari puncak R', `${fmt(hrDet, 1)} bpm (${peaks.length} denyut)`],
-      ['Interval RR', ms(c.rr)],
-      ['Amplitudo R / P / T', `${mV(c.rAmp)} / ${mV(c.pAmp)} / ${mV(c.tAmp)}`],
-      ['Durasi P / QRS / T (±2σ)', `${ms(c.pDur)} / ${ms(c.qrsDur)} / ${ms(c.tDur)}`],
-      ['Interval PR / QT', `${ms(c.pr)} / ${ms(c.qt)}`],
-      ['Pita frekuensi utama', c.bandwidthHint],
-    );
-  } else {
-    rows.push(
-      ['Sumber', 'Sinus uji'],
-      ['Frekuensi', `${fmt(p.sineFreq, 1)} Hz (periode ${ms(1 / p.sineFreq)})`],
-      ['Amplitudo puncak', mV(p.sineAmp)],
-    );
-  }
+  // Baris khas profil (diformat oleh profil itu sendiri), lalu rentang tipikal & diagnostik.
+  const rows = [...prof.info({ p, clean: ecg.clean, x: ecg.x, fs: ecg.fs })];
+  rows.push(
+    ['Rentang amplitudo tipikal', `${fmtVolt(prof.amplitudo.tipikal[0])} – ${fmtVolt(prof.amplitudo.tipikal[1])} (${prof.amplitudo.keterangan})`],
+    ['Rentang frekuensi diagnostik', `${hz(prof.band[0])} – ${hz(prof.band[1])}`],
+  );
 
   const st = signalStats(ecg.x);
   const d = p.disturbances;
-  const active = [
-    d.baseline.on && `baseline ${fmt(d.baseline.freq, 1)} Hz`,
-    d.mains.on && `jala-jala ${d.mains.freq} Hz`,
-    d.hf.on && 'noise HF',
-    d.alias.on && `alias ${d.alias.freq} Hz`,
-  ].filter(Boolean);
+  const active = activeDisturbances(prof, d);
   const snr = snrDb(ecg.clean, ecg.noise);
   rows.push(
     '-',
     ['Laju sampel domain analog', `${FS_ANALOG.toLocaleString('id-ID')} Hz`],
     ['Durasi / jumlah sampel', `${fmt(p.duration, 0)} s / ${ecg.x.length.toLocaleString('id-ID')}`],
     ['Gangguan aktif', active.length ? active.join(', ') : 'tidak ada'],
-    ['Vpp masukan', mV(st.vpp, 3)],
-    ['Rerata / RMS masukan', `${mV(st.mean, 3)} / ${mV(st.rms, 3)}`],
+    ['Vpp masukan', fmtVolt(st.vpp)],
+    ['Rerata / RMS masukan', `${fmtVolt(st.mean)} / ${fmtVolt(st.rms)}`],
     ['SNR (sinyal bersih : gangguan)', Number.isFinite(snr) ? `${fmt(snr, 1)} dB` : '∞ (tanpa gangguan)'],
   );
-  $('infoSignal').innerHTML = table(rows);
+  $('infoSignal').innerHTML = table(rows)
+    + `<div class="model-note"><b>Model sederhana, bukan data klinis.</b> ${prof.deskripsi}<ul>${prof.batas.map((b) => `<li>${b}</li>`).join('')}</ul></div>`;
 
   $('infoAmp').innerHTML = table([
     ['Gain', `×${amp.gain.toLocaleString('id-ID')} (${fmt(20 * Math.log10(amp.gain), 1)} dB)`],
-    ['Batas saturasi', `±${fmt(amp.vSat, 1)} V`],
+    ['Batas saturasi (rail)', `±${fmtTrim(amp.vSat)} V`],
     ['Vpp keluaran', `${fmt(amp.vppOut, 3)} V`],
     ['Vpp ideal (tanpa saturasi)', `${fmt(amp.vppIdeal, 3)} V`],
     ['Sampel ter-clip', `${fmt(amp.clippedPercent, 2)} % (${amp.clippedCount.toLocaleString('id-ID')} sampel)`],
@@ -653,26 +753,26 @@ function timeWindow(duration) {
   return [0, w === 'all' ? duration : Math.min(duration, Number(w))];
 }
 
+/** Apakah ada gangguan yang aktif (profil mana pun). */
 function hasDisturbance(d) {
-  return d.baseline.on || d.mains.on || d.hf.on || d.alias.on;
-}
-
-/** Pilih satuan V atau mV berdasarkan puncak sinyal. */
-function voltUnit(peak) {
-  return peak < 0.1 ? { k: 1e3, unit: 'mV' } : { k: 1, unit: 'V' };
+  return Object.values(d).some((v) => v && v.on);
 }
 
 function renderExp1(result) {
   const { ecg, amp } = result.stages;
   const [tMin, tMax] = timeWindow(ecg.params.duration);
 
-  const inputSeries = [{ y: ecg.x, fs: ecg.fs, scale: 1e3, color: COLORS.signal, label: 'masukan (dengan gangguan)' }];
+  // Satuan sumbu masukan otomatis (µV / mV / V) menurut puncak sinyal masukan.
+  let inPeak = 0;
+  for (let i = 0; i < ecg.x.length; i++) { const a = Math.abs(ecg.x[i]); if (a > inPeak) inPeak = a; }
+  const { k: ki, unit: ui } = voltUnit(inPeak);
+  const inputSeries = [{ y: ecg.x, fs: ecg.fs, scale: ki, color: COLORS.signal, label: 'masukan (dengan gangguan)' }];
   if ($('showClean').checked && hasDisturbance(ecg.params.disturbances)) {
-    inputSeries.push({ y: ecg.clean, fs: ecg.fs, scale: 1e3, color: COLORS.clean, width: 1.2, dash: [5, 3], label: 'bersih' });
+    inputSeries.push({ y: ecg.clean, fs: ecg.fs, scale: ki, color: COLORS.clean, width: 1.2, dash: [5, 3], label: 'bersih' });
   }
   drawPlot($('plotInput'), {
     series: inputSeries, tMin, tMax,
-    xLabel: 'Waktu (s)', yLabel: 'Tegangan (mV)',
+    xLabel: 'Waktu (s)', yLabel: `Tegangan (${ui})`,
   });
 
   const st = signalStats(amp.y);
@@ -688,8 +788,8 @@ function renderExp1(result) {
     // Tampilkan garis ±Vsat bila sinyal mendekati batas saturasi.
     yInclude: peak > 0.5 * amp.vSat ? [amp.vSat * k, -amp.vSat * k] : [],
     hLines: [
-      { y: amp.vSat * k, color: COLORS.clip, label: `+${fmt(amp.vSat, 0)} V (saturasi)` },
-      { y: -amp.vSat * k, color: COLORS.clip, label: `−${fmt(amp.vSat, 0)} V (saturasi)` },
+      { y: amp.vSat * k, color: COLORS.clip, label: `+${fmtTrim(amp.vSat)} V (saturasi)` },
+      { y: -amp.vSat * k, color: COLORS.clip, label: `−${fmtTrim(amp.vSat)} V (saturasi)` },
     ],
   });
 }
@@ -703,6 +803,20 @@ const F_RANGE = [0.03, 2000]; // Hz, sumbu log untuk respons frekuensi & spektru
  * Analisis yang mahal (FFT, korelasi, pengukuran −3 dB) dihitung sekali per hasil
  * pipeline dan hanya ketika tab Eksperimen 2 dibuka.
  */
+/**
+ * Indeks puncak R untuk metrik R/ST (hanya ECG). Jadwal denyut diambil dari sadapan II (R selalu
+ * positif); bila R pada sadapan terpilih tidak dominan positif (mis. aVR, aVL, V1–V3) metrik
+ * R/ST tidak bermakna dan daftar dikosongkan.
+ */
+function ecgBeatPeaks(ecg) {
+  const p = ecg.params;
+  if (p.source !== 'ecg') return [];
+  const a = leadWaveAmplitudes(p.lead, p.rAmp);
+  if (!(a.R > 0.25 * p.rAmp)) return [];
+  const ii = p.lead === 'II' ? ecg.clean : getProfile('ecg').generator(ecg.t, { ...p, lead: 'II' });
+  return detectRPeaks(ii, ecg.fs);
+}
+
 function exp2Analysis(result) {
   if (result.exp2) return result.exp2;
   const { ecg, amp, filt } = result.stages;
@@ -710,13 +824,16 @@ function exp2Analysis(result) {
   // Referensi = apa yang "seharusnya" keluar dari amplifier tanpa gangguan & saturasi.
   const ref = new Float64Array(ecg.clean.length);
   for (let i = 0; i < ref.length; i++) ref[i] = amp.gain * ecg.clean[i];
-  const rPeaks = ecg.params.source === 'ecg' ? detectRPeaks(ecg.clean, fs) : [];
+  const rPeaks = ecgBeatPeaks(ecg);
   const toDb = (a) => a.map((v) => 20 * Math.log10(Math.max(v, 1e-12)));
   const sb = amplitudeSpectrum(amp.y, fs);
   const sa = amplitudeSpectrum(filt.y, fs);
+  const { filter } = filt;
   result.exp2 = {
     ref,
-    m3: measureMinus3dB(filt.filter.sections, fs),
+    // Tepi pita diukur pada kaskade TANPA notch tambahan (takik notch menambah titik −3 dB).
+    m3: measureMinus3dB(filter.baseSections, fs),
+    notchM3: filter.notchSection ? measureMinus3dB([filter.notchSection], fs) : null,
     before: filterQualityMetrics({ ref, y: amp.y, fs, rPeaks }),
     after: filterQualityMetrics({ ref, y: filt.y, fs, rPeaks }),
     spec: { f: sb.f, before: toDb(sb.amp), after: toDb(sa.amp), df: sb.df },
@@ -746,21 +863,27 @@ function renderExp2(result) {
   const { filter } = filt;
   const d = ecg.params.disturbances;
   const gain = amp.gain;
+  const prof = getProfile(ecg.params.source);
+  const isEcg = prof.id === 'ecg';
 
   $('noiseTip').hidden = hasDisturbance(d);
   document.querySelectorAll('.xcard[data-xtype]').forEach((el) => {
     el.classList.toggle('active', el.dataset.xtype === filter.type);
   });
+  $('profileAdvice').innerHTML = `<h5>Untuk profil ${prof.nama}</h5><p>${prof.filterAdvice}</p>`
+    + `<p class="hint">Rentang frekuensi diagnostik model: ${hz(prof.band[0])} – ${hz(prof.band[1])}.</p>`;
 
   // --- Ringkasan ---
+  const notchTxt = filter.design.notch && filter.type !== 'notch'
+    ? `<span>notch tambahan ${hz(filter.design.notch.f0)}: BW −3 dB terukur <span class="m3">${a.notchM3.freqs.length === 2 ? hz(a.notchM3.freqs[1] - a.notchM3.freqs[0]) : '–'}</span></span>` : '';
   $('filterSummary').innerHTML = filter.type === 'none'
     ? '<span class="big">Tanpa filter (bypass)</span><span>Pilih jenis filter di kolom kiri.</span>'
     : `<span class="big">${filter.label}</span>
-       <span>−3 dB terukur: <span class="m3">${describeCutoffs(a.m3)}</span></span>
+       <span>−3 dB terukur: <span class="m3">${describeCutoffs(a.m3)}</span></span>${notchTxt}
        <span>delay ≈ ${fmt(a.after.delay * 1e3, 1)} ms</span>`;
 
   // --- Respons frekuensi ---
-  const special = [filter.design.fc, filter.design.f0, filter.design.fLow, filter.design.fHigh, ...a.m3.freqs]
+  const special = [filter.design.fc, filter.design.f0, filter.design.fLow, filter.design.fHigh, filter.design.notch?.f0, ...a.m3.freqs]
     .filter((v) => Number.isFinite(v) && v > F_RANGE[0] && v < F_RANGE[1]);
   const fGrid = Float64Array.from([...logspace(F_RANGE[0], F_RANGE[1], 1200), ...special]).sort();
   const hDb = frequencyResponse(filter.sections, filt.fs, fGrid);
@@ -827,12 +950,16 @@ function renderExp2(result) {
   } else if (filter.type === 'notch') {
     respRows.push(['BW desain f0/Q', hz(filter.design.bw)]);
   }
-  const hr = ecg.params.hr;
+  if (filter.design.notch && filter.type !== 'notch') {
+    respRows.push(['Notch tambahan: BW desain f0/Q', hz(filter.design.notch.bw)],
+      ['Notch tambahan: |H| di f0', at(filter.design.notch.f0)]);
+  }
+  const [fRep, repLabel] = prof.repFreq(ecg.params);
   respRows.push(
     '-',
     [`|H| @ ${fmtSig(d.baseline.freq)} Hz (baseline wander)`, at(d.baseline.freq)],
-    [`|H| @ ${fmtSig(hr / 60)} Hz (fundamental HR)`, at(hr / 60)],
-    ['|H| @ 10 Hz (pita QRS)', at(10)],
+    ...(isEcg ? [[`|H| @ ${fmtSig(ecg.params.hr / 60)} Hz (fundamental HR)`, at(ecg.params.hr / 60)]] : []),
+    [`|H| @ ${fmtSig(fRep)} Hz (${repLabel})`, at(fRep)],
     ['|H| @ 50 Hz (jala-jala)', at(50)],
     [`|H| @ ${d.alias.freq} Hz (komponen alias)`, at(d.alias.freq)],
   );
@@ -840,18 +967,23 @@ function renderExp2(result) {
 
   // --- Panel evaluasi (dirujuk ke masukan: dibagi gain) ---
   const b = a.before, f = a.after;
-  const inMv = (v, dg = 3) => (Number.isFinite(v) ? `${fmt((v / gain) * 1e3, dg)} mV` : '–');
+  const inV = (v) => (Number.isFinite(v) ? fmtVolt(v / gain) : '–');
   const pctR = (v) => (Number.isFinite(v) ? `${fmt(v * 100, 1)} %` : '–');
   const db = (v) => (Number.isFinite(v) ? `${fmt(v, 1)} dB` : '∞');
   $('infoFilterEval').innerHTML = table3(['Sebelum', 'Sesudah'], [
     ['SNR terhadap referensi', db(b.snrDb), db(f.snrDb)],
-    ['RMSE (dirujuk ke masukan)', inMv(b.rmse), inMv(f.rmse)],
-    ['Tinggi R (% referensi)', pctR(b.rRatio), pctR(f.rRatio)],
-    [`Deviasi ST (referensi ${inMv(b.stDevRef)})`, inMv(b.stDev), inMv(f.stDev)],
+    ['RMSE (dirujuk ke masukan)', inV(b.rmse), inV(f.rmse)],
+    // Tinggi R dan deviasi ST hanya bermakna untuk morfologi ECG.
+    ...(isEcg && Number.isFinite(f.rRatio) ? [
+      ['Tinggi R (% referensi)', pctR(b.rRatio), pctR(f.rRatio)],
+      [`Deviasi ST (referensi ${inV(b.stDevRef)})`, inV(b.stDev), inV(f.stDev)],
+    ] : []),
     ['Delay terestimasi', `${fmt(b.delay * 1e3, 1)} ms`, `${fmt(f.delay * 1e3, 1)} ms`],
   ]);
 
-  $('filterNotes').innerHTML = filterNotes({ a, gain, d, filter }).map(([cls, txt]) => `<li class="${cls}">${txt}</li>`).join('');
+  const notes2 = filterNotes({ a, gain, d, filter });
+  if (isEcg && !Number.isFinite(f.rRatio)) notes2.push(['', `Metrik tinggi R dan deviasi ST tidak tersedia pada sadapan ${ecg.params.lead}: gelombang R tidak dominan positif pada sadapan ini.`]);
+  $('filterNotes').innerHTML = notes2.map(([cls, txt]) => `<li class="${cls}">${txt}</li>`).join('');
 }
 
 /** Catatan dinamis yang menafsirkan metrik untuk pengaturan saat ini. */
@@ -875,7 +1007,7 @@ function filterNotes({ a, gain, d, filter }) {
     notes.push(['good', `✓ SNR terhadap referensi naik ${fmt(b.snrDb, 1)} → ${fmt(f.snrDb, 1)} dB: noise yang dibuang lebih besar daripada distorsi yang ditimbulkan.${
       morphWarn ? ' Namun SNR saja tidak cukup — peringatan morfologi di atas menunjukkan informasi klinis ikut hilang.' : ''}`]);
   } else if (f.snrDb < b.snrDb - 1) {
-    notes.push(['warn', `⚠ SNR terhadap referensi turun ${db1(b.snrDb)} → ${fmt(f.snrDb, 1)} dB: sinyal tampak berubah, tetapi tidak lebih dekat ke ECG yang sebenarnya.`]);
+    notes.push(['warn', `⚠ SNR terhadap referensi turun ${db1(b.snrDb)} → ${fmt(f.snrDb, 1)} dB: sinyal tampak berubah, tetapi tidak lebih dekat ke sinyal yang sebenarnya.`]);
   }
   if (Math.abs(f.delay) > 0.004) {
     notes.push(['', `Filter kausal menggeser sinyal ≈ ${fmt(f.delay * 1e3, 1)} ms (fase tidak linear).`]);
@@ -938,6 +1070,7 @@ function renderExp3(result) {
   const nyq = p.fs / 2;
   const d = ecg.params.disturbances;
   const hfFold = d.hf.on && !adc.aa;
+  const prof = getProfile(ecg.params.source);
   const visible = a.aliases.filter((t) => t.visible);
 
   // --- Banner deteksi aliasing ---
@@ -957,7 +1090,7 @@ function renderExp3(result) {
     <span>Nyquist fs/2 = ${hz(nyq)}</span><span>Ts = ${fmt(1000 / p.fs, 2)} ms</span>
     <span>${q.codes.length.toLocaleString('id-ID')} sampel</span>
     <span class="big">${p.bits} bit</span><span>${q.levels.toLocaleString('id-ID')} level</span>
-    <span>LSB = <span class="m3">${fmtVolt(q.lsb)}</span></span><span>rentang ±${fmt(p.vRef, 2)} V</span>`;
+    <span>LSB = <span class="m3">${fmtVolt(q.lsb)}</span></span><span>rentang ±${fmtTrim(p.vRef)} V</span>`;
 
   // --- Plot sinyal + sampel ---
   const [tMin, tMax] = timeWindow(ecg.params.duration);
@@ -973,15 +1106,15 @@ function renderExp3(result) {
     series, tMin, tMax, xLabel: 'Waktu (s)', yLabel: `Tegangan (${unit})`,
     yInclude: rangeView ? [-p.vRef, p.vRef] : [],
     hLines: [
-      { y: p.vRef * k, color: COLORS.clip, label: `+${fmt(p.vRef, 2)} V (batas ADC)` },
-      { y: -p.vRef * k, color: COLORS.clip, label: `−${fmt(p.vRef, 2)} V (batas ADC)` },
+      { y: p.vRef * k, color: COLORS.clip, label: `+${fmtTrim(p.vRef)} V (batas ADC)` },
+      { y: -p.vRef * k, color: COLORS.clip, label: `−${fmtTrim(p.vRef)} V (batas ADC)` },
     ],
     levels: { step: q.lsb * k },
   });
 
   // --- Plot error kuantisasi (sampel ter-clip tidak digambar) ---
   const errShow = Float64Array.from(q.err, (e, i) => (q.clipped[i] ? NaN : e));
-  const eu = q.lsb < 0.2 ? { k: 1e3, unit: 'mV' } : { k: 1, unit: 'V' };
+  const eu = voltUnit(q.lsb); // µV / mV / V / ... menurut besar LSB
   drawPlot($('plotQErr'), {
     series: [{ y: errShow, fs: p.fs, scale: eu.k, color: COLORS.clean, style: 'stem', label: 'e[n] (sampel tidak ter-clip)' }],
     tMin, tMax, xLabel: 'Waktu (s)', yLabel: `Error (${eu.unit})`,
@@ -1049,7 +1182,7 @@ function renderExp3(result) {
   $('infoQuant').innerHTML = table([
     ['Resolusi', `${p.bits} bit`],
     ['Jumlah level 2^N', q.levels.toLocaleString('id-ID')],
-    ['Rentang ADC', `±${fmt(p.vRef, 2)} V (lebar ${fmt(2 * p.vRef, 2)} V)`],
+    ['Rentang ADC', `±${fmtTrim(p.vRef)} V (lebar ${fmtTrim(2 * p.vRef)} V)`],
     ['LSB Δ = rentang / 2^N', `${fmtVolt(q.lsb)} (≈ ${fmtVolt(q.lsb / amp.gain)} dirujuk ke masukan)`],
     ['Rentang kode (two\'s complement)', `${q.codeMin.toLocaleString('id-ID')} … ${q.codeMax.toLocaleString('id-ID')}`],
     ['Kode terpakai oleh sinyal', `${cMin.toLocaleString('id-ID')} … ${cMax.toLocaleString('id-ID')} (${fmt((100 * used) / q.levels, 1)} % level)`],
@@ -1080,11 +1213,11 @@ function renderExp3(result) {
   $('aliasTable').innerHTML = aliasRows.length
     ? `<div class="table-scroll"><table class="data"><tr><th style="text-align:left">Komponen</th><th>f</th><th>vs fs/2</th>`
       + `<th>f<sub>alias</sub> = |f − k·fs|</th><th>Amplitudo di masukan ADC</th><th style="text-align:left">Status</th></tr>${aliasRows.join('')}</table></div>`
-    : '<p class="hint">Tidak ada komponen nada gangguan yang aktif. Aktifkan "Komponen aliasing" atau pilih sinus uji di atas fs/2.</p>';
+    : '<p class="hint">Tidak ada komponen nada gangguan yang aktif. Aktifkan "Komponen aliasing" atau pilih profil Sinus uji dengan frekuensi di atas fs/2.</p>';
 
   // --- Catatan dinamis ---
   const notes = [];
-  if (q.clippedCount) notes.push(['warn', `⚠ ${q.clippedCount.toLocaleString('id-ID')} sampel melebihi ±${fmt(p.vRef, 2)} V dan ter-clip — perbesar rentang ADC atau turunkan gain.`]);
+  if (q.clippedCount) notes.push(['warn', `⚠ ${q.clippedCount.toLocaleString('id-ID')} sampel melebihi ±${fmtTrim(p.vRef)} V dan ter-clip — perbesar rentang ADC atau turunkan gain.`]);
   if (used / q.levels < 0.1 && p.bits >= 4) {
     notes.push(['warn', `Sinyal hanya memakai ${fmt((100 * used) / q.levels, 1)} % level (≈ ${fmt(Math.log2(used), 1)} bit efektif dari ${p.bits} bit). Persempit rentang ADC atau naikkan gain.`]);
   }
@@ -1093,6 +1226,11 @@ function renderExp3(result) {
     notes.push(['warn', `Puncak tertinggi hasil sampling ${fmt((100 * (maxIn - maxS)) / maxIn, 1)} % lebih rendah dari sinyal kontinu — sampel tidak jatuh tepat di puncak R.`]);
   }
   if (adc.aa) notes.push(['good', `✓ Anti-aliasing aktif: komponen di atas ${hz(adc.aa.fc)} diredam sebelum sampling (mis. ${fmt(magnitudeDb(adc.aa.sections, fsA, Math.min(1.5 * nyq, fsA / 2 - 1)), 0)} dB di 1,5·fs/2).`]);
+  if (fsA % p.fs !== 0) {
+    // sample() menginterpolasi linear dari grid 10 kHz bila fs tidak membagi 10 kHz (batas model ADC).
+    const fTop = Math.min(prof.band[1], nyq);
+    notes.push(['', `fs ${fmt(p.fs, 0)} Hz tidak membagi 10 kHz tepat: sampel diinterpolasi linear dari grid 10 kHz — galat amplitudo ≤ ${fmt((1 - Math.cos((Math.PI * fTop) / fsA)) * 100, 2)} % pada ${hz(fTop)} dan membesar ke frekuensi tinggi (termasuk amplitudo alias). fs yang membagi 10 kHz (100, 250, 500, 1000, 2000, 2500 Hz) memberi sampel eksak.`]);
+  }
   $('adcNotes').innerHTML = notes.map(([cls, t]) => `<li class="${cls}">${t}</li>`).join('');
 
   // --- Tabel 20 sampel pertama ---
@@ -1107,78 +1245,89 @@ function renderExp3(result) {
     + `<th>biner (${p.bits}-bit)</th><th>x<sub>q</sub>[n] = kode·Δ (V)</th><th>error (mV)</th></tr>${rows.join('')}</table>`;
 }
 
-/** Tegangan dengan satuan otomatis V / mV / µV. */
-function fmtVolt(v) {
-  const a = Math.abs(v);
-  if (!Number.isFinite(v)) return '–';
-  if (a >= 0.1) return `${fmt(v, 3)} V`;
-  if (a >= 1e-4) return `${fmt(v * 1e3, 3)} mV`;
-  return `${fmt(v * 1e6, 2)} µV`;
-}
-
 // ---------------------------------------------------------------------------
 // Eksperimen 4 — output digital
 // ---------------------------------------------------------------------------
 
-/** Mengatur seluruh kontrol ke konfigurasi rekomendasi (monitor ECG). */
+/** Mengatur kontrol ke konfigurasi rekomendasi profil aktif (sinyal dan gangguan tidak diubah). */
 function applyRecommended() {
-  document.querySelector('input[name=gainPreset][value="1000"]').checked = true;
-  $('gainLog').value = 3;
-  $('fType').value = 'bpf';
-  $('bpfLow').value = Math.log10(0.5);
-  $('bpfHigh').value = Math.log10(40);
-  document.querySelector('input[name=fsPreset][value="250"]').checked = true;
-  $('fsFree').value = 250;
-  document.querySelector('input[name=bitsPreset][value="12"]').checked = true;
-  $('bitsFree').value = 12;
-  $('vRef').value = 2;
-  $('aaOn').checked = true;
+  applyPresetToControls(profile.preset);
   scheduleUpdate();
 }
 
 const CHECK = { ok: '✓', warn: '⚠', info: 'ℹ' };
 
+/** Daftar gangguan aktif sebagai teks pendek, menurut definisi gangguan profil. */
+function activeDisturbances(prof, d) {
+  return prof.disturbances
+    .filter((def) => d[def.id] && d[def.id].on)
+    .map((def) => (def.id === 'alias' ? `alias ${d.alias.freq} Hz` : def.short));
+}
+
+/** Ringkasan sumber sinyal untuk tabel konfigurasi. */
+function sourceSummary(prof, par) {
+  switch (prof.id) {
+    case 'ecg': return `ECG sintetis, ${par.hr} bpm, sadapan ${par.lead}`;
+    case 'emg': return `EMG sintetis, ${par.emgPattern === 'burst' ? 'burst berulang' : 'tonik'}, kontraksi ${fmt(par.emgLevel * 100, 0)} %`;
+    case 'eeg': return `EEG sintetis, mata ${par.eegState === 'closed' ? 'tertutup' : 'terbuka'}`;
+    case 'eog': return `EOG sintetis, langkah saccade ${fmtVolt(par.eogAmp)}`;
+    default: return `Sinus uji ${hz(par.sineFreq)}`;
+  }
+}
+
 function renderExp4(result) {
   const { ecg, amp, filt, adc } = result.stages;
+  const prof = getProfile(ecg.params.source);
   const a3 = exp3Analysis(result);
   const p = adc.params;
   const q = adc.quant;
   const f = filt.filter;
-  const m3 = measureMinus3dB(f.sections, filt.fs);
+  const m3 = measureMinus3dB(f.baseSections, filt.fs);
   const d = ecg.params.disturbances;
 
-  // Pita sinyal tertinggi yang diteruskan ke ADC: tepi atas LPF/BPF, atau ±150 Hz bila tidak ada.
-  const fHigh = f.type === 'lpf' ? f.design.fc : f.type === 'bpf' ? f.design.fHigh : 150;
+  $('presetTitle').textContent = `Konfigurasi rekomendasi (${prof.singkat})`;
+  $('presetText').textContent = `${presetSummary(prof.preset)} Sinyal dan gangguan tidak diubah.`;
+  $('reasonTitle').textContent = `Alasan konfigurasi rekomendasi (${prof.singkat})`;
+  $('reasonCards').innerHTML = prof.recommendReasons.map(([h, t]) => `<div class="xcard"><h5>${h}</h5><p>${t}</p></div>`).join('');
+
+  // Pita sinyal tertinggi yang diteruskan ke ADC: tepi atas LPF/BPF, atau tepi atas pita diagnostik profil.
+  const fHigh = f.type === 'lpf' ? f.design.fc : f.type === 'bpf' ? f.design.fHigh : prof.band[1];
   const aliasBad = a3.aliases.some((t) => t.visible) || a3.above > 0.01;
   let pkOut = 0;
   for (const v of adc.input) pkOut = Math.max(pkOut, Math.abs(v));
   const lsbIn = q.lsb / amp.gain;
-  const activeDist = [d.baseline.on && 'baseline', d.mains.on && '50 Hz', d.hf.on && 'noise HF', d.alias.on && `alias ${d.alias.freq} Hz`].filter(Boolean);
+  const activeDist = activeDisturbances(prof, d);
 
+  // Cek pita filter terhadap rentang kerja profil (aturan praktis untuk pembelajaran).
+  const bc = prof.bandCheck;
+  const hpEdge = f.type === 'hpf' ? f.design.fc : f.type === 'bpf' ? f.design.fLow : null;
+  const lpEdge = f.type === 'lpf' ? f.design.fc : f.type === 'bpf' ? f.design.fHigh : null;
+  const notch = f.design.notch ?? (f.type === 'notch' ? { f0: f.design.f0, q: f.design.q } : null);
   const filterCheck = (() => {
     if (f.type === 'none') return ['warn', 'tanpa filter: baseline wander dan noise HF tidak ditekan'];
-    if ((f.type === 'hpf' && f.design.fc > 0.5) || (f.type === 'bpf' && f.design.fLow > 0.5)) return ['warn', 'HPF > 0,5 Hz berisiko mendistorsi segmen ST'];
-    if ((f.type === 'lpf' && f.design.fc < 40) || (f.type === 'bpf' && f.design.fHigh < 40)) return ['warn', 'LPF < 40 Hz memotong puncak R'];
-    if (f.type === 'notch' && f.design.q < 10) return ['warn', 'notch lebar (Q < 10) memakan komponen QRS'];
-    return ['ok', 'pita mempertahankan morfologi ECG'];
+    if (hpEdge != null && hpEdge > bc.hpMax) return ['warn', `HPF ${hz(hpEdge)} > ${hz(bc.hpMax)} berisiko ${bc.hpWhy}`];
+    if (lpEdge != null && lpEdge < bc.lpMin) return ['warn', `LPF ${hz(lpEdge)} < ${hz(bc.lpMin)} ${bc.lpWhy}`];
+    if (notch && notch.q < 10) return ['warn', `notch lebar (Q < 10) memakan komponen sinyal di sekitar ${hz(notch.f0)}`];
+    return ['ok', `pita kerja ${prof.singkat} dipertahankan (${hz(bc.hpMax)} … ${hz(bc.lpMin)} tidak terpotong)`];
   })();
 
   const rows = [
-    ['Sumber', ecg.params.source === 'ecg' ? `ECG sintetis, ${ecg.params.hr} bpm` : `Sinus uji ${hz(ecg.params.sineFreq)}`,
+    ['Sumber', sourceSummary(prof, ecg.params),
       ['info', activeDist.length ? `gangguan: ${activeDist.join(', ')}` : 'tanpa gangguan']],
-    ['Amplifier', `gain ×${amp.gain.toLocaleString('id-ID')} · Vsat ±${fmt(amp.vSat, 0)} V`,
+    ['Amplifier', `gain ×${amp.gain.toLocaleString('id-ID')} · rail ±${fmtTrim(amp.vSat)} V`,
       amp.saturated ? ['warn', `saturasi: ${fmt(amp.clippedPercent, 2)} % sampel ter-clip`] : ['ok', 'linier, tanpa clipping']],
     ['Filter', `${f.label}${m3.freqs.length ? ` · −3 dB terukur ${m3.freqs.map(hz).join(' & ')}` : ''}`, filterCheck],
-    ['Anti-aliasing', adc.aa ? `Butterworth orde ${adc.aa.order}, fc ${hz(adc.aa.fc)}` : 'tidak aktif',
+    ['Anti-aliasing', adc.aa ? `Butterworth orde ${adc.aa.order}, fc ${hz(adc.aa.fc)} · ${fmt(magnitudeDb(adc.aa.sections, FS_ANALOG, p.fs / 2), 1)} dB di fs/2` : 'tidak aktif',
       adc.aa ? ['ok', 'aktif sebelum sampling'] : (aliasBad ? ['warn', 'aliasing terdeteksi — aktifkan AA'] : ['info', 'tidak ada alias terdeteksi'])],
     ['Sampling', `fs ${hz(p.fs)} · Nyquist ${hz(p.fs / 2)} · ${q.codes.length.toLocaleString('id-ID')} sampel`,
       aliasBad ? ['warn', 'ada komponen di atas fs/2 yang terlipat']
         : p.fs / 2 >= fHigh ? ['ok', `fs/2 ≥ pita sinyal (${hz(fHigh)})`] : ['warn', `fs/2 < pita sinyal (${hz(fHigh)})`]],
-    ['Kuantisasi', `${p.bits} bit · ${q.levels.toLocaleString('id-ID')} level · ±${fmt(p.vRef, 2)} V · LSB ${fmtVolt(q.lsb)}`,
+    ['Kuantisasi', `${p.bits} bit · ${q.levels.toLocaleString('id-ID')} level · ±${fmtTrim(p.vRef)} V · LSB ${fmtVolt(q.lsb)}`,
       q.clippedCount ? ['warn', `${q.clippedCount} sampel ter-clip di ADC`]
-        // Aturan praktis: LSB (dirujuk ke elektroda) ≤ 1/30 amplitudo gelombang P (0,15 mV) = 5 µV.
-        : lsbIn <= 5e-6 ? ['ok', `LSB ≈ ${fmtVolt(lsbIn)} di elektroda (≤ 5 µV)`] : ['warn', `LSB ≈ ${fmtVolt(lsbIn)} di elektroda — detail gelombang P hilang`]],
-    ['Pemanfaatan rentang ADC', `puncak ${fmtVolt(pkOut)} dari ${fmt(p.vRef, 2)} V`,
+        // Aturan praktis per profil: LSB dirujuk ke elektroda ≤ target (ECG: 1/30 gelombang P = 5 µV).
+        : lsbIn <= prof.lsbTarget ? ['ok', `LSB ≈ ${fmtVolt(lsbIn)} di elektroda (≤ ${fmtVolt(prof.lsbTarget)})`]
+          : ['warn', `LSB ≈ ${fmtVolt(lsbIn)} di elektroda — di atas target ${fmtVolt(prof.lsbTarget)} untuk ${prof.singkat}`]],
+    ['Pemanfaatan rentang ADC', `puncak ${fmtVolt(pkOut)} dari ${fmtTrim(p.vRef)} V`,
       pkOut / p.vRef < 0.1 ? ['warn', `hanya ${fmt((100 * pkOut) / p.vRef, 0)} % — naikkan gain`] : ['ok', `${fmt((100 * pkOut) / p.vRef, 0)} % rentang`]],
     ['Output digital', `${(p.fs * p.bits).toLocaleString('id-ID')} bit/s · ${fmt((p.fs * p.bits * ecg.params.duration) / 8 / 1024, 1)} KiB per ${fmt(ecg.params.duration, 0)} s`,
       ['info', `SQNR terukur ${sqnrText(q.sqnrMeasured)}`]],
@@ -1196,15 +1345,15 @@ function renderExp4(result) {
     series: [{ y: Float64Array.from(q.codes), fs: p.fs, scale: 1, color: COLORS.after, style: 'stem', label: `kode ADC (${p.bits}-bit, two's complement)` }],
     tMin, tMax, xLabel: 'Waktu (s)', yLabel: 'Kode ADC (integer)',
     hLines: [
-      { y: q.codeMax, color: COLORS.clip, label: `kode maks ${q.codeMax}` },
-      { y: q.codeMin, color: COLORS.clip, label: `kode min ${q.codeMin}` },
+      { y: q.codeMax, color: COLORS.clip, label: `kode maks ${q.codeMax.toLocaleString('id-ID')}` },
+      { y: q.codeMin, color: COLORS.clip, label: `kode min ${q.codeMin.toLocaleString('id-ID')}` },
     ],
   });
 
   // Pratinjau CSV (baris yang sama persis dengan berkas unduhan)
   const preview = adcToCsv({ quant: { codes: q.codes.subarray(0, 6), xq: q.xq.subarray(0, 6) }, sampled: adc.sampled });
   $('csvPreview').textContent = `${preview}… (${q.codes.length.toLocaleString('id-ID')} baris data)`;
-  $('csvInfo').textContent = `${csvName(adc)} · 3 kolom: waktu_s, kode_adc, tegangan_rekonstruksi_V`;
+  $('csvInfo').textContent = `${csvName(result)} · 3 kolom: waktu_s, kode_adc, tegangan_rekonstruksi_V`;
 
   const rowsT = [];
   for (let n = 0; n < Math.min(20, q.codes.length); n++) {
@@ -1214,7 +1363,7 @@ function renderExp4(result) {
   $('outTable').innerHTML = `<table class="data"><tr><th>n</th><th>waktu (s)</th><th>kode ADC</th><th>tegangan rekonstruksi (V)</th></tr>${rowsT.join('')}</table>`;
 }
 
-const csvName = (adc) => `ecg_adc_${adc.params.fs}Hz_${adc.params.bits}bit.csv`;
+const csvName = (result) => `${result.stages.ecg.params.source}_adc_${result.stages.adc.params.fs}Hz_${result.stages.adc.params.bits}bit.csv`;
 
 function downloadCsv() {
   if (!lastResult) return;
@@ -1223,7 +1372,7 @@ function downloadCsv() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = csvName(adc);
+  a.download = csvName(lastResult);
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -1251,9 +1400,12 @@ function valTable(rows) {
     if (r.assumption) return ['amber', '≈ asumsi error seragam tidak berlaku (N < 6)'];
     return ['fail', '✗ di luar toleransi'];
   };
-  const tol = (r) => (r.mode === 'le' ? '≤ teori'
-    : (r.tolRel && r.tolRel < 1e-6) || (r.tolAbs && r.tolAbs < 1e-9) ? 'tepat (presisi float)'
-    : r.tolRel ?`±${fmt(r.tolRel * 100, r.tolRel < 0.01 ? 1 : 0)} %` : r.tolAbs ? `±${fmtVal(r.tolAbs, r.satuan)}` : 'tepat');
+  const tol = (r) => {
+    if (r.mode === 'le') return '≤ teori';
+    if ((r.tolRel && r.tolRel < 1e-6) || (r.tolAbs && r.tolAbs < 1e-9)) return 'tepat (presisi float)';
+    if (r.tolRel) return `±${fmt(r.tolRel * 100, r.tolRel < 0.01 ? 1 : 0)} %`;
+    return r.tolAbs ? `±${fmtVal(r.tolAbs, r.satuan)}` : 'tepat';
+  };
   return `<div class="table-scroll"><table class="data"><tr><th class="l">Besaran</th><th class="l">Rumus</th><th>Teori</th><th>Simulasi</th><th>Selisih</th><th>Toleransi</th><th class="l">Status</th></tr>${
     rows.map((r) => {
       const [cls, txt] = status(r);
@@ -1278,22 +1430,27 @@ function renderValidation(result) {
   // (a) Amplifier
   const va = validateAmplifier(ecg.x, amp);
   $('valAmp').innerHTML = `<p class="hint">Sampel uji: |V<sub>in</sub>| maks = ${fmtVolt(va.vin)} → G·V<sub>in</sub> = ×${amp.gain.toLocaleString('id-ID')} · ${fmtVolt(va.vin)} = ${fmtVolt(va.ideal)}; `
-    + `|G·V<sub>in</sub>| ${va.saturated ? '&gt;' : '≤'} ${fmt(va.vSat, 0)} V → <b>${va.saturated ? 'SATURASI, Vout = ±Vsat' : 'linier'}</b></p>${valTable(va.rows)}`;
+    + `|G·V<sub>in</sub>| ${va.saturated ? '&gt;' : '≤'} ${fmtTrim(va.vSat)} V → <b>${va.saturated ? 'SATURASI, Vout = ±Vsat' : 'linier'}</b></p>${valTable(va.rows)}`;
 
   // (b) RC
   const r = Number($('rcR').value) * 1e3, c = Number($('rcC').value) * 1e-6;
   if (r > 0 && c > 0) {
     const vr = cached(`rc:${r}:${c}`, () => validateRc(r, c, FS_ANALOG));
-    $('rcInfo').textContent = `τ = RC = ${fmt(vr.tau * 1e3, 3)} ms · fc = ${hz(vr.fc)}${vr.outOfRange ? ' — melebihi 0,45 × 10 kHz, tidak dapat disimulasikan' : ''}`;
+    const limit = vr.limit === 'high'
+      ? ` — melebihi 0,45 × 10 kHz (≈ ${hz(0.45 * FS_ANALOG)}), tidak dapat disimulasikan`
+      : vr.limit === 'low'
+        ? ` — di bawah ${hz(RC_FC_MIN)}, terlalu rendah untuk disimulasikan (transien > 3 juta sampel)`
+        : '';
+    $('rcInfo').textContent = `τ = RC = ${fmt(vr.tau * 1e3, 3)} ms · fc = ${hz(vr.fc)}${limit}`;
     $('valRc').innerHTML = valTable(vr.rows);
   } else {
     $('rcInfo').textContent = 'R dan C harus > 0.';
     $('valRc').innerHTML = '';
   }
 
-  // Filter aktif di pipeline: fc desain vs −3 dB terukur
+  // Filter aktif di pipeline: fc desain vs −3 dB terukur (pada kaskade tanpa notch tambahan)
   const f = filt.filter;
-  const m3 = measureMinus3dB(f.sections, filt.fs);
+  const m3 = measureMinus3dB(f.baseSections, filt.fs);
   const mk = (nama, rumus, teori, sim, satuan, tolRel) => {
     const diff = sim - teori;
     return { nama, rumus, teori, simulasi: sim, satuan, diff, rel: diff / Math.abs(teori), tolRel, ok: Math.abs(diff) <= tolRel * Math.abs(teori) };
@@ -1301,14 +1458,19 @@ function renderValidation(result) {
   const fr = [];
   if (f.type === 'lpf' || f.type === 'hpf') {
     fr.push(mk(`${f.type.toUpperCase()} pipeline: −3 dB`, 'fc desain (Butterworth orde 2)', f.design.fc, m3.freqs[0], 'Hz', 0.001));
-    fr.push(mk('Gain pada fc', '20·log10(1/√2)', -10 * Math.log10(2), magnitudeDb(f.sections, filt.fs, f.design.fc), 'dB', 0.1));
+    fr.push(mk('Gain pada fc', '20·log10(1/√2)', -10 * Math.log10(2), magnitudeDb(f.baseSections, filt.fs, f.design.fc), 'dB', 0.1));
   } else if (f.type === 'bpf') {
     fr.push(mk('BPF pipeline: −3 dB bawah', 'f_L desain', f.design.fLow, m3.freqs[0], 'Hz', 0.02));
     fr.push(mk('BPF pipeline: −3 dB atas', 'f_H desain', f.design.fHigh, m3.freqs[1], 'Hz', 0.02));
   } else if (f.type === 'notch') {
     fr.push(mk('Notch pipeline: lebar pita −3 dB', 'BW = f0 / Q', f.design.bw, m3.freqs[1] - m3.freqs[0], 'Hz', 0.02));
   }
-  const cEq = c > 0 && fr.length && f.type !== 'notch' ? ` R setara untuk fc ${hz(f.design.fc ?? f.design.fHigh)} dengan C = ${fmt(c * 1e6, 3)} µF: R = 1/(2π·fc·C) = ${fmt(1 / (2 * Math.PI * (f.design.fc ?? f.design.fHigh) * c) / 1e3, 2)} kΩ.` : '';
+  if (f.notchSection) {
+    const nm = measureMinus3dB([f.notchSection], filt.fs);
+    fr.push(mk('Notch tambahan: lebar pita −3 dB', 'BW = f0 / Q', f.design.notch.bw, nm.freqs[1] - nm.freqs[0], 'Hz', 0.02));
+  }
+  const cEq = c > 0 && fr.length && (f.type === 'lpf' || f.type === 'hpf' || f.type === 'bpf')
+    ? ` R setara untuk fc ${hz(f.design.fc ?? f.design.fHigh)} dengan C = ${fmt(c * 1e6, 3)} µF: R = 1/(2π·fc·C) = ${fmt(1 / (2 * Math.PI * (f.design.fc ?? f.design.fHigh) * c) / 1e3, 2)} kΩ.` : '';
   $('valFilter').innerHTML = fr.length
     ? `<p class="hint" style="margin:10px 0 4px">Filter aktif di pipeline (Eksperimen 2) — biquad orde 2, bukan RC orde 1.${cEq}</p>${valTable(fr)}`
     : '<p class="hint" style="margin:10px 0 0">Filter pipeline tidak aktif.</p>';
@@ -1316,10 +1478,55 @@ function renderValidation(result) {
   // (c) ADC
   const { bits, vRef } = adc.params;
   const vd = cached(`adc:${bits}:${vRef}`, () => validateAdc(bits, vRef));
-  $('adcValInfo').textContent = `N = ${bits} bit, Vrange = 2 × ${fmt(vRef, 2)} V`;
-  $('valAdc').innerHTML = `<p class="hint">Level & LSB dari ramp yang menyapu seluruh rentang; error RMS & SQNR dari sinus skala penuh (A = Vref − ½LSB, 7,31 Hz, fs 1 kHz, 20 s).</p>`
+  $('adcValInfo').textContent = `N = ${bits} bit, Vrange = 2 × ${fmtTrim(vRef)} V`;
+  $('valAdc').innerHTML = `<p class="hint">${bits <= 16
+    ? 'Level & LSB dari ramp yang menyapu seluruh rentang;'
+    : 'N > 16: jumlah level dari kode min/maks saat masukan jauh di luar rentang, LSB dan error maks dari ramp lokal ±2000 LSB di sekitar 0;'
+  } error RMS & SQNR dari sinus skala penuh (A = Vref − ½LSB, 7,31 Hz, fs 1 kHz, 20 s).</p>`
     + `${valTable(vd.rows)}<p class="hint" style="margin:10px 0 4px">Sinyal pipeline saat ini (bukan sinus skala penuh): SQNR dibandingkan dengan P<sub>x</sub>/(LSB²/12).</p>`
     + valTable(validateAdcSignal(adc.quant));
+}
+
+// ---------------------------------------------------------------------------
+// Visualisasi 3D (modul viewer3d.js dan Three.js dimuat malas saat tab dibuka)
+// ---------------------------------------------------------------------------
+let v3d = null;
+let v3dLoading = null;
+
+function ensureV3d() {
+  if (!v3dLoading) {
+    const els = {
+      stage: $('v3dStage'), plot: $('v3dPlot2d'), readout: $('v3dReadout'), dyn: $('v3dDyn'), status: $('v3dStatus'),
+      btnPlay: $('v3dPlay'), selSpeed: $('v3dSpeed'), selLead: $('v3dLead'), chkVcg: $('v3dVcg'),
+      btnReset: $('v3dReset'), time: $('v3dTime'),
+    };
+    v3dLoading = import('./viewer3d.js')
+      .then((m) => m.createViewer(els, {
+        // sadapan dipilih di tab 3D → ikut mengubah sadapan pipeline bila disinkronkan
+        onLeadChange: (id) => { if ($('v3dSync').checked && $('ctl_lead')) { $('ctl_lead').value = id; scheduleUpdate(); } },
+      }))
+      .then((v) => { v3d = v; return v; })
+      .catch((e) => {
+        v3dLoading = null;
+        $('v3dStatus').hidden = false;
+        $('v3dStatus').textContent = `Modul visualisasi 3D gagal dimuat: ${e.message}`;
+        throw e;
+      });
+  }
+  return v3dLoading;
+}
+
+function renderV3d(result) {
+  const p = result.stages.ecg.params;
+  const isEcg = p.source === 'ecg';
+  $('v3dNotice').hidden = isEcg;
+  $('v3dBody').hidden = !isEcg;
+  if (!isEcg) { if (v3d) v3d.setActive(false); return; }
+  ensureV3d().then((v) => {
+    v.setModel({ hr: p.hr, rAmp: p.rAmp, duration: p.duration });
+    if ($('v3dSync').checked) v.setLead(p.lead);
+    v.setActive(activeTab() === 'v3d');
+  }).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -1327,7 +1534,7 @@ function renderValidation(result) {
 // ---------------------------------------------------------------------------
 function renderPipeline() {
   $('pipeline').innerHTML = STAGE_DEFS.map((s, i) => (
-    `${i ? '<span class="arrow">→</span>' : ''}<span class="stage${s.ready ? '' : ' pending'}" title="${s.ready ? 'Sudah tersedia' : 'Belum diimplementasikan'}">${s.label}</span>`
+    `${i ? '<span class="arrow">→</span>' : ''}<span class="stage${s.ready ? '' : ' pending'}" title="${s.ready ? 'Sudah tersedia' : 'Belum diimplementasikan'}">${s.id === 'ecg' ? `${profile.singkat} (analog)` : s.label}</span>`
   )).join('');
 }
 
@@ -1341,6 +1548,7 @@ function renderPlots(result) {
   else if (tab === 'exp3') renderExp3(result);
   else if (tab === 'exp4') renderExp4(result);
   else if (tab === 'valid') renderValidation(result);
+  else if (tab === 'v3d') renderV3d(result);
 }
 
 let lastResult = null;
@@ -1362,14 +1570,19 @@ function scheduleUpdate() {
 }
 
 function init() {
-  renderPipeline();
+  $('profile').innerHTML = PROFILES.map((p) => `<option value="${p.id}">${p.nama}</option>`).join('');
+  applyFilterLimits();
+  switchProfile(DEFAULT_PROFILE_ID);
 
   const controls = $('controls');
+  // Mengganti profil: dipasang pada <select> itu sendiri agar berjalan SEBELUM pendengar
+  // 'change' milik panel (yang memanggil scheduleUpdate) — kontrol baru harus sudah ada.
+  $('profile').addEventListener('change', (e) => switchProfile(e.target.value));
   controls.addEventListener('input', (e) => {
     // Menggeser slider gain bebas otomatis memilih preset "Bebas".
-    if (e.target.id === 'gainLog') document.querySelector('input[name=gainPreset][value=custom]').checked = true;
-    if (e.target.id === 'fsFree') document.querySelector('input[name=fsPreset][value=custom]').checked = true;
-    if (e.target.id === 'bitsFree') document.querySelector('input[name=bitsPreset][value=custom]').checked = true;
+    if (e.target.id === 'gainLog') setRadio('gainPreset', 'custom');
+    if (e.target.id === 'fsFree') setRadio('fsPreset', 'custom');
+    if (e.target.id === 'bitsFree') setRadio('bitsPreset', 'custom');
     scheduleUpdate();
   });
   controls.addEventListener('change', (e) => {
@@ -1395,16 +1608,20 @@ function init() {
   $('applyRecommended').addEventListener('click', applyRecommended);
   $('exportCsv').addEventListener('click', downloadCsv);
   $('aliasScenario').addEventListener('click', () => {
-    $('aliasOn').checked = true;
+    $('dist_alias_on').checked = true;
+    $('dist_alias_freq').value = 80;
     $('aaOn').checked = false;
     $('fType').value = 'none';
-    document.querySelector('input[name=fsPreset][value="100"]').checked = true;
+    $('fAddNotch').checked = false;
+    setRadio('fsPreset', 100);
     $('fsFree').value = 100;
     $('window').value = '0.5';
     scheduleUpdate();
   });
+  $('v3dNotes').innerHTML = MODEL_NOTES.map((n) => `<li>${n}</li>`).join('');
+  $('v3dToEcg').addEventListener('click', () => { switchProfile('ecg'); scheduleUpdate(); });
   $('enableAllNoise').addEventListener('click', () => {
-    for (const id of ['bwOn', 'mainsOn', 'hfOn', 'aliasOn']) $(id).checked = true;
+    for (const d of profile.disturbances) $(`dist_${d.id}_on`).checked = true;
     scheduleUpdate();
   });
 
@@ -1412,6 +1629,7 @@ function init() {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b === btn)));
       document.querySelectorAll('.tabpanel').forEach((p) => { p.hidden = p.id !== btn.dataset.tab; });
+      if (v3d && btn.dataset.tab !== 'v3d') v3d.setActive(false); // render 3D hanya saat tabnya terlihat
       if (lastResult) renderPlots(lastResult); // canvas baru terlihat → ukur & gambar ulang
     });
   });

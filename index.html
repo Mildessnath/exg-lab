@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Simulator Akuisisi ECG</title>
+  <title>EXG Lab — Simulator Akuisisi Biopotensial</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M2 18h7l3-10 4 18 3-12 2 4h9' fill='none' stroke='%231f6feb' stroke-width='3' stroke-linejoin='round'/%3E%3C/svg%3E">
   <style>
     :root {
@@ -173,38 +173,56 @@
     table.data td.fail { color: var(--bad); font-weight: 600; text-align: left; }
     table.data td.amber { color: var(--warn-ink); font-weight: 600; text-align: left; }
     table.data td.l, table.data th.l { text-align: left; }
+    /* ---------- Profil sinyal ---------- */
+    .profile-card { grid-column: 1 / -1; background: #f3f7ff; border-color: #c4d6fb; }
+    .model-note { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+    .model-note ul { margin: 4px 0 0; padding-left: 18px; }
+    .warn-line { color: var(--warn-ink); background: var(--warn-bg); border: 1px solid #eedc82; border-radius: 5px; padding: 3px 8px; font-size: 12px; margin: 5px 0 0; }
+    /* ---------- Visualisasi 3D ---------- */
+    .v3d-controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 0 0 10px; font-size: 13px; }
+    .v3d-controls label { display: inline-flex; gap: 6px; align-items: center; }
+    .v3d-controls select { width: auto; }
+    .v3d-controls button {
+      font: inherit; font-size: 13px; padding: 5px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer;
+    }
+    .v3d-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+    @media (max-width: 900px) { .v3d-grid { grid-template-columns: minmax(0, 1fr); } }
+    .v3d-stage { margin: 0; min-width: 0; }
+    .v3d-box {
+      position: relative; width: 100%; height: 380px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+      background: linear-gradient(#fafcff, #edf2fa); color: var(--muted); font-size: 13px; display: flex; align-items: center; justify-content: center;
+    }
+    @media (max-width: 600px) { .v3d-box { height: 300px; } }
+    .v3d-stage figcaption { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+    .chip { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; vertical-align: baseline; }
+    .v3d-dyn { display: block; margin-top: 4px; color: var(--ink); }
+    .v3d-side { min-width: 0; }
+    #v3dPlot2d { width: 100%; height: 230px; display: block; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    .v3d-time { width: 100%; margin: 6px 0 4px; }
+    .v3d-readout table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+    .v3d-readout td { padding: 2px 0; vertical-align: top; }
+    .v3d-readout td:first-child { color: var(--muted); padding-right: 8px; }
+    .v3d-readout td:last-child { text-align: right; }
+    .v3d-readout tr.sep td { border-top: 1px solid var(--line); padding-top: 4px; }
     footer { color: var(--muted); font-size: 12px; padding: 0 16px 16px; }
   </style>
 </head>
 <body>
   <header>
-    <h1>Simulator Akuisisi Sinyal ECG</h1>
-    <p>AI-Assisted Biomedical Signal Conditioning and Data Acquisition — rantai ECG → Amplifier → Filter → Sampling → Kuantisasi → Output digital</p>
+    <h1>EXG Lab — Simulator Akuisisi Biopotensial</h1>
+    <p>AI-Assisted Biomedical Signal Conditioning and Data Acquisition — rantai <span id="hdrSig">ECG</span> → Amplifier → Filter → Sampling → Kuantisasi → Output digital · profil ECG, EMG, EEG, EOG</p>
   </header>
-  <p class="disclaimer"><strong>Hanya untuk pembelajaran.</strong> Sinyal di sini adalah model sintetis yang disederhanakan; bukan perangkat medis dan tidak boleh dipakai untuk diagnosis atau keputusan klinis.</p>
+  <p class="disclaimer"><strong>Hanya untuk pembelajaran.</strong> Semua sinyal (ECG, EMG, EEG, EOG) adalah <b>sintetis dan model sederhana</b>, bukan pengganti data klinis; aplikasi ini bukan perangkat medis dan tidak boleh dipakai untuk diagnosis atau keputusan klinis.</p>
 
   <div class="layout">
     <!-- ================= KONTROL ================= -->
     <aside class="controls" id="controls">
-      <h2>Sumber sinyal</h2>
+      <h2>Jenis sinyal</h2>
       <div class="row">
-        <select id="source" aria-label="Sumber sinyal">
-          <option value="ecg">ECG sintetis (PQRST gaussian)</option>
-          <option value="sine">Sinus uji</option>
-        </select>
+        <select id="profile" aria-label="Jenis sinyal"></select>
+        <p class="hint" id="profileHint"></p>
       </div>
-      <div class="row only-ecg">
-        <label for="hr">Detak jantung <output id="hrVal"></output></label>
-        <input type="range" id="hr" min="40" max="150" step="1" value="72">
-      </div>
-      <div class="row only-sine" hidden>
-        <label for="sineFreq">Frekuensi sinus <output id="sineFreqVal"></output></label>
-        <input type="range" id="sineFreq" min="0.5" max="200" step="0.5" value="10">
-      </div>
-      <div class="row only-sine" hidden>
-        <label for="sineAmp">Amplitudo sinus (puncak) <output id="sineAmpVal"></output></label>
-        <input type="range" id="sineAmp" min="0.1" max="2" step="0.05" value="1">
-      </div>
+      <div id="profileControls"></div>
       <div class="row">
         <span class="lbl">Durasi simulasi</span>
         <select id="duration" aria-label="Durasi simulasi">
@@ -215,39 +233,7 @@
       </div>
 
       <h2>Gangguan</h2>
-      <div class="dist off" id="bwBox">
-        <label class="toggle"><input type="checkbox" id="bwOn"> Baseline wander (0,3 Hz)</label>
-        <div class="row sub">
-          <label for="bwAmp">Amplitudo <output id="bwAmpVal"></output></label>
-          <input type="range" id="bwAmp" min="0" max="1" step="0.01" value="0.3">
-        </div>
-      </div>
-      <div class="dist off" id="mainsBox">
-        <label class="toggle"><input type="checkbox" id="mainsOn"> Interferensi jala-jala 50 Hz</label>
-        <div class="row sub">
-          <label for="mainsAmp">Amplitudo <output id="mainsAmpVal"></output></label>
-          <input type="range" id="mainsAmp" min="0" max="0.5" step="0.01" value="0.1">
-        </div>
-      </div>
-      <div class="dist off" id="hfBox">
-        <label class="toggle"><input type="checkbox" id="hfOn"> Noise HF (putih)</label>
-        <div class="row sub">
-          <label for="hfRms">RMS <output id="hfRmsVal"></output></label>
-          <input type="range" id="hfRms" min="0" max="0.2" step="0.005" value="0.03">
-        </div>
-      </div>
-      <div class="dist off" id="aliasBox">
-        <label class="toggle"><input type="checkbox" id="aliasOn"> Komponen aliasing</label>
-        <div class="row sub">
-          <label for="aliasFreq">Frekuensi <output id="aliasFreqVal"></output></label>
-          <input type="range" id="aliasFreq" min="10" max="1000" step="1" value="80">
-        </div>
-        <div class="row sub">
-          <label for="aliasAmp">Amplitudo <output id="aliasAmpVal"></output></label>
-          <input type="range" id="aliasAmp" min="0" max="0.5" step="0.01" value="0.1">
-        </div>
-        <p class="hint sub">Nada di atas frekuensi Nyquist ADC. Contoh: 80 Hz yang dicuplik pada 100 Hz akan muncul sebagai 20 Hz (Eksperimen 3).</p>
-      </div>
+      <div id="disturbBox"></div>
 
       <h2>Amplifier</h2>
       <div class="row">
@@ -261,8 +247,12 @@
       </div>
       <div class="row">
         <label for="gainLog">Gain bebas (skala log) <output id="gainLogVal"></output></label>
-        <input type="range" id="gainLog" min="0" max="3.7" step="0.01" value="3">
-        <p class="hint">Menggeser slider otomatis memilih "Bebas". Saturasi keluaran: ±2 V.</p>
+        <input type="range" id="gainLog" min="0" max="5" step="any" value="3">
+        <p class="hint">Menggeser slider otomatis memilih "Bebas" (×1 hingga ×100.000).</p>
+      </div>
+      <div class="row">
+        <label for="vSat">Rail amplifier (saturasi) <output id="vSatVal"></output></label>
+        <input type="range" id="vSat" min="0.5" max="5" step="0.1" value="2">
       </div>
 
       <h2>Filter (Eksperimen 2)</h2>
@@ -278,6 +268,9 @@
       <div class="row" data-ftype="lpf hpf bpf notch">
         <span class="lbl">Preset</span>
         <div class="presets" id="fPresets"></div>
+      </div>
+      <div class="row" data-ftype="lpf hpf bpf">
+        <label class="toggle"><input type="checkbox" id="fAddNotch"> + Notch (kaskade dengan filter ini)</label>
       </div>
       <div class="row" data-ftype="lpf">
         <label for="lpfFc">Cutoff fc <output id="lpfFcVal"></output></label>
@@ -314,7 +307,7 @@
           <label><input type="radio" name="fsPreset" value="500">500</label>
           <label><input type="radio" name="fsPreset" value="custom">Bebas</label>
         </div>
-        <input type="range" id="fsFree" min="20" max="1000" step="1" value="250" aria-label="fs bebas">
+        <input type="range" id="fsFree" min="20" max="4000" step="1" value="250" aria-label="fs bebas">
       </div>
       <div class="row">
         <span class="lbl">Resolusi <output id="bitsVal"></output></span>
@@ -325,7 +318,7 @@
           <label><input type="radio" name="bitsPreset" value="12" checked>12</label>
           <label><input type="radio" name="bitsPreset" value="custom">Bebas</label>
         </div>
-        <input type="range" id="bitsFree" min="1" max="16" step="1" value="12" aria-label="Bit bebas">
+        <input type="range" id="bitsFree" min="1" max="24" step="1" value="12" aria-label="Bit bebas">
       </div>
       <div class="row">
         <label for="vRef">Rentang ADC <output id="vRefVal"></output></label>
@@ -359,11 +352,12 @@
         <button role="tab" aria-selected="false" data-tab="exp3">Eksperimen 3 · ADC: Sampling &amp; Kuantisasi</button>
         <button role="tab" aria-selected="false" data-tab="exp4">Eksperimen 4 · Output Digital</button>
         <button role="tab" aria-selected="false" data-tab="valid">Validasi Matematis</button>
+        <button role="tab" aria-selected="false" data-tab="v3d">Visualisasi 3D</button>
       </div>
 
       <section class="tabpanel" id="exp1" role="tabpanel">
         <div class="plot-card">
-          <h3>Tahap 1 — Sinyal masukan (domain analog, 10 kHz)</h3>
+          <h3>Tahap 1 — Sinyal masukan <span id="sigTitle">ECG</span> (domain analog, 10 kHz)</h3>
           <canvas class="plot" id="plotInput"></canvas>
         </div>
         <div class="plot-card">
@@ -377,7 +371,7 @@
       </section>
 
       <section class="tabpanel" id="exp2" role="tabpanel" hidden>
-        <p class="tip" id="noiseTip">Tidak ada gangguan aktif — yang terlihat hanyalah efek filter pada ECG bersih.
+        <p class="tip" id="noiseTip">Tidak ada gangguan aktif — yang terlihat hanyalah efek filter pada sinyal bersih.
           <button type="button" id="enableAllNoise">Aktifkan semua gangguan</button></p>
         <div class="filter-summary" id="filterSummary"></div>
 
@@ -396,7 +390,7 @@
                 <option value="overlay">Overlay</option>
                 <option value="split">Terpisah</option>
               </select>
-              <label><input type="checkbox" id="showRef"> referensi bersih (G × ECG murni)</label>
+              <label><input type="checkbox" id="showRef"> referensi bersih (G × sinyal murni)</label>
             </span>
           </h3>
           <canvas class="plot" id="plotFiltA"></canvas>
@@ -411,18 +405,19 @@
         <div class="explain">
           <h4>Penjelasan</h4>
           <div class="explain-grid">
+            <div class="xcard profile-card" id="profileAdvice"></div>
             <div class="xcard" data-xtype="lpf">
               <h5>Low-pass (LPF)</h5>
               <p><b>Mengurangi:</b> noise frekuensi tinggi (noise putih, artefak otot/EMG), serta interferensi 50 Hz dan komponen 80 Hz bila cutoff di bawahnya. Di depan ADC, LPF berperan sebagai filter <i>anti-aliasing</i>.</p>
               <p><b>Pilihan umum:</b> 40 Hz untuk mode monitor (tampilan bersih), 100–150 Hz untuk mode diagnostik.</p>
-              <p><b>Risiko:</b> energi kompleks QRS membentang hingga ±40–100 Hz. Cutoff terlalu rendah memotong puncak R (lebih pendek dan lebih lebar), menghilangkan notch/slur QRS dan spike pacu jantung. Coba preset 15 Hz.</p>
+              <p><b>Risiko (contoh ECG):</b> energi kompleks QRS membentang hingga ±40–100 Hz. Cutoff terlalu rendah memotong puncak R (lebih pendek dan lebih lebar), menghilangkan notch/slur QRS dan spike pacu jantung. Coba preset 15 Hz.</p>
               <p><b>Catatan:</b> LPF 40 Hz orde 2 hanya meredam 50 Hz sekitar 5 dB — transisinya terlalu landai; untuk jala-jala lebih efektif notch.</p>
             </div>
             <div class="xcard" data-xtype="hpf">
               <h5>High-pass (HPF)</h5>
               <p><b>Mengurangi:</b> baseline wander (napas ±0,15–0,3 Hz, gerak elektroda, perubahan impedansi kulit) dan offset DC elektroda.</p>
               <p><b>Pilihan umum:</b> 0,5 Hz pada monitor; 0,05 Hz untuk EKG diagnostik agar segmen ST tetap utuh.</p>
-              <p><b>Risiko:</b> segmen ST dan gelombang T adalah bagian ECG yang berubah paling lambat (komponen &lt; 1 Hz). HPF 5 Hz membuang komponen ini, dan karena fase filter IIR kausal tidak linear, muncul <i>undershoot</i> setelah QRS → elevasi/depresi ST semu yang dapat disalahartikan sebagai iskemia; gelombang P dan T mengecil serta berubah bentuk.</p>
+              <p><b>Risiko (contoh ECG):</b> segmen ST dan gelombang T adalah bagian ECG yang berubah paling lambat (komponen &lt; 1 Hz). HPF 5 Hz membuang komponen ini, dan karena fase filter IIR kausal tidak linear, muncul <i>undershoot</i> setelah QRS → elevasi/depresi ST semu yang dapat disalahartikan sebagai iskemia; gelombang P dan T mengecil serta berubah bentuk.</p>
             </div>
             <div class="xcard" data-xtype="bpf">
               <h5>Band-pass (BPF)</h5>
@@ -511,9 +506,8 @@
       <section class="tabpanel" id="exp4" role="tabpanel" hidden>
         <div class="preset-box">
           <div>
-            <b>Konfigurasi rekomendasi (monitor ECG)</b>
-            <p class="hint">Gain ×1000 · BPF 0,5–40 Hz · anti-aliasing aktif · fs 250 Hz · 12 bit · rentang ±2 V.
-              Gangguan dan sumber sinyal tidak diubah.</p>
+            <b id="presetTitle">Konfigurasi rekomendasi</b>
+            <p class="hint" id="presetText"></p>
           </div>
           <button type="button" id="applyRecommended" class="primary">Terapkan konfigurasi rekomendasi</button>
         </div>
@@ -537,13 +531,8 @@
         <div class="info" style="margin-top:14px"><h4>20 sampel pertama</h4><div class="table-scroll" id="outTable"></div></div>
 
         <div class="explain">
-          <h4>Alasan konfigurasi rekomendasi</h4>
-          <div class="explain-grid">
-            <div class="xcard"><h5>Gain ×1000</h5><p>R ≈ 1 mV menjadi ≈ 1 V: memakai separuh rentang ADC ±2 V dan menyisakan ruang untuk baseline wander serta noise sebelum saturasi.</p></div>
-            <div class="xcard"><h5>BPF 0,5–40 Hz</h5><p>Pita monitor: HPF 0,5 Hz menekan baseline wander, LPF 40 Hz menekan noise HF dan sebagian 50 Hz, sambil mempertahankan bentuk QRS (puncak R ±95 %). Untuk EKG diagnostik dipakai 0,05–150 Hz.</p></div>
-            <div class="xcard"><h5>fs 250 Hz + anti-aliasing</h5><p>Nyquist 125 Hz jauh di atas pita 40 Hz; AA LPF orde 8 (fc 100 Hz) meredam noise pita lebar sebelum sampling, tetapi tidak total: ≈ −15,6 dB di Nyquist (125 Hz) dan baru ≈ −48 dB di 200 Hz (0,8·fs), sehingga komponen di antaranya masih dapat terlipat sebagian. Satu QRS terwakili ±25 sampel.</p></div>
-            <div class="xcard"><h5>12 bit, ±2 V</h5><p>LSB 0,98 mV di keluaran ≈ 0,98 µV dirujuk ke elektroda — jauh di bawah amplitudo gelombang P (±0,15 mV). Laju data 250 × 12 = 3.000 bit/s.</p></div>
-          </div>
+          <h4 id="reasonTitle">Alasan konfigurasi rekomendasi</h4>
+          <div class="explain-grid" id="reasonCards"></div>
         </div>
       </section>
 
@@ -565,10 +554,57 @@
 
         <div class="info" style="margin-top:14px"><h4>(c) ADC: level, LSB, error, SQNR <span class="hint" id="adcValInfo"></span></h4><div id="valAdc"></div></div>
       </section>
+
+      <section class="tabpanel" id="v3d" role="tabpanel" hidden>
+        <div class="warn-line" id="v3dNotice" hidden style="margin:0 0 10px">
+          Visualisasi 3D memperagakan model dipol jantung dan hanya tersedia untuk profil <b>ECG</b>.
+          <button type="button" id="v3dToEcg" class="primary" style="margin-left:8px">Pilih profil ECG</button>
+        </div>
+        <div id="v3dBody">
+          <p class="hint" style="margin-top:0"><b>Model dipol tunggal yang disederhanakan — bukan volume conductor.</b>
+            Sadapan prekordial V1–V6 hanyalah perkiraan kualitatif. Tidak untuk penggunaan klinis.</p>
+          <div class="v3d-controls">
+            <button type="button" id="v3dPlay" aria-pressed="true">⏸ Jeda</button>
+            <label>Kecepatan
+              <select id="v3dSpeed" aria-label="Kecepatan animasi">
+                <option value="0.1">0,1×</option><option value="0.25" selected>0,25×</option>
+                <option value="0.5">0,5×</option><option value="1">1× (waktu nyata)</option>
+              </select></label>
+            <label>Sadapan <select id="v3dLead" aria-label="Sadapan pada visualisasi"></select></label>
+            <label><input type="checkbox" id="v3dSync" checked> sinkron dengan sadapan pipeline</label>
+            <label><input type="checkbox" id="v3dVcg" checked> jejak VCG</label>
+            <button type="button" id="v3dReset">Setel ulang kamera</button>
+          </div>
+          <div class="v3d-grid">
+            <figure class="v3d-stage" aria-labelledby="v3dCap">
+              <div class="v3d-box" id="v3dStage" role="img" aria-describedby="v3dCap v3dDyn" data-webgl="pending"></div>
+              <div class="warn-line" id="v3dStatus" role="status" hidden></div>
+              <figcaption id="v3dCap">
+                <b>Teks alternatif adegan 3D.</b> Sketsa tidak berskala anatomis, tampak dari depan-kiri-atas: kiri pasien di sisi kanan layar.
+                Torso transparan dengan titik merah = pusat jantung (lokasi dipol); <span class="chip" style="background:#f08c00"></span>panah oranye =
+                dipol H(t) yang panjang dan arahnya berubah mengikuti waktu simulasi; <span class="chip" style="background:#8250df"></span>garis ungu =
+                jejak ujung panah (vektorkardiogram) untuk satu denyut; <span class="chip" style="background:#1f6feb"></span>panah biru = vektor
+                sadapan terpilih dan bola biru = elektrodenya; <span class="chip" style="background:#2f9e44"></span>panah hijau = proyeksi H pada
+                sadapan itu (panjang dan arahnya = nilai sinyal sadapan). Seret untuk memutar, roda/cubit untuk zoom; papan ketik: tombol panah, + dan −, spasi = putar/jeda.
+                <span id="v3dDyn" class="v3d-dyn"></span>
+              </figcaption>
+            </figure>
+            <div class="v3d-side">
+              <canvas id="v3dPlot2d" aria-label="Plot 2D sinyal sadapan terpilih terhadap waktu dengan penanda waktu yang bergerak mengikuti animasi"></canvas>
+              <input type="range" id="v3dTime" class="v3d-time" min="0" max="5" step="0.001" value="0" aria-label="Waktu simulasi">
+              <div class="v3d-readout" id="v3dReadout" aria-live="off"></div>
+            </div>
+          </div>
+          <div class="info" style="margin-top:14px">
+            <h4>Asumsi dan keterbatasan model dipol</h4>
+            <ul class="notes" id="v3dNotes"></ul>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
-  <footer>Model edukatif · domain analog disimulasikan pada 10 kHz · semua perhitungan berjalan di peramban.</footer>
+  <footer>EXG Lab · model edukatif dengan sinyal sintetis · domain analog disimulasikan pada 10 kHz · semua perhitungan berjalan di peramban.</footer>
 
   <script type="module" src="js/ui.js"></script>
 </body>

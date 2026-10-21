@@ -19,6 +19,8 @@ import {
 } from '../js/adc.js';
 import { rcCutoff, designRcLowpass, applyBiquad } from '../js/filters.js';
 import { validateAmplifier, validateRc, validateAdc } from '../js/validation.js';
+import { profileTests } from './profiles.test.js';
+import { dipoleTests } from './dipole.test.js';
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -534,6 +536,16 @@ test('validasi amplifier & ADC konsisten dengan simulasi (N ≥ 6)', () => {
   assert.ok(validateAmplifier(r.stages.ecg.x, r.stages.amp).rows.every((row) => row.ok));
   for (const bits of [8, 12, 16]) assert.ok(validateAdc(bits, 2).rows.every((row) => row.ok), `${bits} bit`);
 });
+
+// ===========================================================================
+// Profil sinyal (ECG, EMG, EEG, EOG, sinus uji) dan rentang parameter diperluas
+// ===========================================================================
+profileTests({ test, close, toneAmplitude });
+
+// ===========================================================================
+// Model dipol jantung dan pilihan sadapan
+// ===========================================================================
+dipoleTests({ test, close });
 
 console.log(`\n${passed} lulus, ${failed} gagal`);
 process.exit(failed ? 1 : 0);
